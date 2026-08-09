@@ -1,4 +1,5 @@
 from datetime import datetime
+import io
 import sqlite3
 import pandas as pd
 import streamlit as st
@@ -6,14 +7,24 @@ import streamlit_authenticator as stauth
 
 # --- STREAMLIT PAGE CONFIG ---
 st.set_page_config(
-    page_title="NawatCORE - Inventory & Sales Hub",
+    page_title="NawatCore - Inventory & Sales Hub",
     layout="wide",
     page_icon="🏢",
 )
 
+
+# --- EXCEL GENERATOR HELPER ---
+def generate_excel_bytes(dataframes_dict):
+    """Generates an in-memory Excel file containing one or more sheets."""
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        for sheet_name, df in dataframes_dict.items():
+            df.to_excel(writer, sheet_name=sheet_name, index=False)
+    return output.getvalue()
+
+
 # --- 1. USER LOGIN CONFIGURATION (STREAMLIT SECRETS) ---
 try:
-    # Load credentials securely from st.secrets (.streamlit/secrets.toml)
     credentials = st.secrets["credentials"].to_dict()
 except Exception:
     st.error(
@@ -21,10 +32,10 @@ except Exception:
     )
     st.stop()
 
-# Automatically hash plain-text passwords for security
+# Automatically hash plain-text passwords
 stauth.Hasher.hash_passwords(credentials)
 
-# Initialize the Authenticator
+# Initialize Authenticator
 authenticator = stauth.Authenticate(
     credentials=credentials,
     cookie_name="nawatcore_sales_cookie",
@@ -33,22 +44,23 @@ authenticator = stauth.Authenticate(
 )
 
 # --- LOGIN SCREEN HEADER ---
-st.title("🏢 NawatCORE")
-st.caption("Inventory & Sales Management Portal")
+st.title("🏢 NawatCore")
+st.caption("Official Inventory & Sales Management Portal")
 st.markdown("---")
 
-# Render the Login Form
+# Render Login Form
 authenticator.login()
 
-# Check Authentication Status
+# Check Authentication
 if st.session_state.get("authentication_status") is False:
     st.error("Username or password is incorrect.")
 elif st.session_state.get("authentication_status") is None:
-    st.warning("Please enter your credentials to log in to NawatCORE.")
+    st.warning("Please enter your credentials to log in to NawatCore.")
 elif st.session_state.get("authentication_status"):
 
     # --- SIDEBAR BRANDING & LOGOUT ---
-    st.sidebar.title("🏢 NawatCORE")
+    st.sidebar.title("🏢 NawatCore")
+    st.sidebar.caption("Management Console")
     st.sidebar.write(f"Logged in as: **{st.session_state['name']}**")
     authenticator.logout("Log Out", "sidebar")
 
@@ -101,8 +113,8 @@ elif st.session_state.get("authentication_status"):
     def get_connection():
         return sqlite3.connect(DB_NAME)
 
-    # --- 3. MAIN DASHBOARD APPLICATION ---
-    st.title("📦 NawatCORE | Inventory & Sales Management Hub")
+    # --- 3. MAIN APPLICATION HEADER ---
+    st.title("📦 NawatCore | Inventory & Sales Management Hub")
 
     tabs = st.tabs(
         [
@@ -114,29 +126,41 @@ elif st.session_state.get("authentication_status"):
     )
 
     # -------------------------------------------------------------------
-    # TAB 1: DASHBOARD
+    # TAB 1: DASHBOARD & MASTER EXCEL EXPORT
     # -------------------------------------------------------------------
     with tabs[0]:
-        st.header("Business Overview")
+        st.header("NawatCore Business Overview")
         conn = get_connection()
 
         products_df = pd.read_sql_query("SELECT * FROM products", conn)
         sales_df = pd.read_sql_query(
             """
-            SELECT s.id, p.name AS product_name, s.quantity, s.unit_sale_price,
-                   s.gross_total, s.sale_type, s.shipping_cost, s.net_total, 
-                   s.landed_cost_total, s.net_profit, s.payment_method, s.sale_date 
+            SELECT s.id AS 'Sale ID', s.sale_date AS 'Date & Time', p.name AS 'Product', 
+                   s.quantity AS 'Qty', s.unit_sale_price AS 'Sold Price/Unit', 
+                   s.gross_total AS 'Gross Rev', s.sale_type AS 'Type', 
+                   s.shipping_cost AS 'Shipping Cost', s.net_total AS 'Net Revenue',
+                   s.net_profit AS 'Net Profit', s.payment_method AS 'Payment Method'
             FROM sales s 
             JOIN products p ON s.product_id = p.id
+            ORDER BY s.sale_date DESC
         """,
             conn,
         )
         conn.close()
 
+        # Key Metrics
         m1, m2, m3, m4 = st.columns(4)
         total_products = len(products_df)
-        gross_rev = sales_df["gross_total"].sum() if not sales_df.empty else 0.0
-        net_profit = sales_df["net_profit"].sum() if not sales_df.empty else 0.0
+        gross_rev = (
+            sales_df["Gross Rev"].sum()
+            if not sales_df.empty
+            else 0.0
+        )
+        net_profit = (
+            sales_df["Net Profit"].sum()
+            if not sales_df.empty
+            else 0.0
+        )
         low_stock = (
             len(products_df[products_df["stock"] < 5])
             if not products_df.empty
@@ -148,6 +172,31 @@ elif st.session_state.get("authentication_status"):
         m3.metric("Net Profit", f"${net_profit:,.2f}")
         m4.metric("Low Stock Items (<5)", low_stock)
 
+        st.markdown("---")
+
+        # MASTER EXCEL EXPORT BUTTON
+        st.subheader("📥 Export Reports")
+        st.write(
+            "Download your complete NawatCore data in a single multi-sheet Excel file."
+        )
+
+        if not products_df.empty or not sales_df.empty:
+            excel_data = generate_excel_bytes(
+                {"Inventory": products_df, "Sales Ledger": sales_df}
+            )
+            st.download_button(
+                label="📊 Download Complete NawatCore Excel Report (.xlsx)",
+                data=excel_data,
+                file_name=f"NawatCore_Full_Report_{datetime.now().strftime('%Y%m%d')}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                type="primary",
+            )
+        else:
+            st.info(
+                "Add products or log sales to enable the Master Excel download."
+            )
+
+        st.markdown("---")
         st.subheader("Current Stock & Product Pricing")
         if not products_df.empty:
             products_display = products_df.rename(
@@ -167,10 +216,10 @@ elif st.session_state.get("authentication_status"):
             )
 
     # -------------------------------------------------------------------
-    # TAB 2: MANAGE INVENTORY
+    # TAB 2: MANAGE INVENTORY & INVENTORY EXPORT
     # -------------------------------------------------------------------
     with tabs[1]:
-        st.header("Add New Product")
+        st.header("Add New Product to NawatCore Inventory")
         with st.form("add_product_form", clear_on_submit=True):
             col_a, col_b = st.columns(2)
             p_name = col_a.text_input("Product Name")
@@ -204,18 +253,34 @@ elif st.session_state.get("authentication_status"):
                         )
                         conn.commit()
                         conn.close()
-                        st.success(f"Added **{p_name}** to inventory!")
+                        st.success(f"Added **{p_name}** to NawatCore inventory!")
                         st.rerun()
                     except sqlite3.IntegrityError:
                         st.error("A product with this name already exists.")
                 else:
                     st.warning("Please enter a valid product name.")
 
+        # Inventory Export Section
+        conn = get_connection()
+        inv_df = pd.read_sql_query("SELECT * FROM products", conn)
+        conn.close()
+
+        if not inv_df.empty:
+            st.markdown("---")
+            st.subheader("📥 Export Inventory")
+            inv_excel = generate_excel_bytes({"Inventory": inv_df})
+            st.download_button(
+                label="📦 Download NawatCore Inventory Excel (.xlsx)",
+                data=inv_excel,
+                file_name=f"NawatCore_Inventory_{datetime.now().strftime('%Y%m%d')}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
+
     # -------------------------------------------------------------------
     # TAB 3: LOG SALES
     # -------------------------------------------------------------------
     with tabs[2]:
-        st.header("Record a Transaction")
+        st.header("Record a NawatCore Transaction")
         conn = get_connection()
         products_df = pd.read_sql_query("SELECT * FROM products", conn)
         conn.close()
@@ -333,12 +398,12 @@ elif st.session_state.get("authentication_status"):
             st.info("Add products to inventory before logging sales.")
 
     # -------------------------------------------------------------------
-    # TAB 4: SALES HISTORY
+    # TAB 4: SALES HISTORY & SALES EXPORT
     # -------------------------------------------------------------------
     with tabs[3]:
-        st.header("Sales History & Ledger")
+        st.header("NawatCore Sales History & Ledger")
         conn = get_connection()
-        sales_df = pd.read_sql_query(
+        sales_ledger_df = pd.read_sql_query(
             """
             SELECT s.id AS 'Sale ID', s.sale_date AS 'Date & Time', p.name AS 'Product', 
                    s.quantity AS 'Qty', s.unit_sale_price AS 'Sold Price/Unit', 
@@ -353,7 +418,17 @@ elif st.session_state.get("authentication_status"):
         )
         conn.close()
 
-        if not sales_df.empty:
-            st.dataframe(sales_df, use_container_width=True)
+        if not sales_ledger_df.empty:
+            st.dataframe(sales_ledger_df, use_container_width=True)
+
+            st.markdown("---")
+            st.subheader("📥 Export Sales Ledger")
+            sales_excel = generate_excel_bytes({"Sales Ledger": sales_ledger_df})
+            st.download_button(
+                label="🛒 Download NawatCore Sales Ledger Excel (.xlsx)",
+                data=sales_excel,
+                file_name=f"NawatCore_Sales_Ledger_{datetime.now().strftime('%Y%m%d')}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
         else:
             st.info("No sales recorded yet.")
