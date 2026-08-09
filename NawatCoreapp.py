@@ -28,14 +28,11 @@ try:
     credentials = st.secrets["credentials"].to_dict()
 except Exception:
     st.error(
-        "⚠️ Credentials configuration missing! Please add `[credentials]` to your `.streamlit/secrets.toml` file or Streamlit Cloud Settings."
+        "⚠️ Credentials configuration missing! Please check Streamlit Cloud Secrets."
     )
     st.stop()
 
-# Automatically hash plain-text passwords
-stauth.Hasher.hash_passwords(credentials)
-
-# Initialize Authenticator
+# Initialize the Authenticator directly without manually calling Hasher
 authenticator = stauth.Authenticate(
     credentials=credentials,
     cookie_name="nawatcore_sales_cookie",
