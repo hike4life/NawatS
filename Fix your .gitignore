@@ -1,0 +1,3 @@
+.streamlit/secrets.toml
+inventory_sales.db
+__pycache__/
