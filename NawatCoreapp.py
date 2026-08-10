@@ -1,6 +1,5 @@
 from datetime import datetime
 import io
-import json
 import sqlite3
 import pandas as pd
 import streamlit as st
@@ -33,7 +32,6 @@ def secrets_to_dict(obj):
 
 
 try:
-    # Recursively convert st.secrets into a standard mutable dictionary
     credentials = secrets_to_dict(st.secrets["credentials"])
     stauth.Hasher.hash_passwords(credentials)
 except Exception as e:
@@ -46,6 +44,7 @@ authenticator = stauth.Authenticate(
     key="secret_auth_key_12345",
     cookie_expiry_days=30,
 )
+
 # --- LOGIN SCREEN HEADER ---
 st.title("🏢 NawatCore")
 st.caption("Official Inventory & Sales Management Portal")
@@ -72,6 +71,7 @@ elif st.session_state.get("authentication_status"):
         conn = sqlite3.connect(DB_NAME)
         c = conn.cursor()
 
+        # Products Table
         c.execute(
             """
             CREATE TABLE IF NOT EXISTS products (
@@ -85,6 +85,7 @@ elif st.session_state.get("authentication_status"):
         """
         )
 
+        # Sales Table
         c.execute(
             """
             CREATE TABLE IF NOT EXISTS sales (
@@ -104,6 +105,13 @@ elif st.session_state.get("authentication_status"):
             )
         """
         )
+
+        # Safe migration for notes column
+        try:
+            c.execute("ALTER TABLE sales ADD COLUMN notes TEXT DEFAULT ''")
+        except sqlite3.OperationalError:
+            pass
+
         conn.commit()
         conn.close()
 
@@ -125,7 +133,7 @@ elif st.session_state.get("authentication_status"):
     )
 
     # -------------------------------------------------------------------
-    # TAB 1: DASHBOARD
+    # TAB 1: DASHBOARD (WITH UNITS SOLD PER PRODUCT)
     # -------------------------------------------------------------------
     with tabs[0]:
         st.header("NawatCore Business Overview")
@@ -138,10 +146,25 @@ elif st.session_state.get("authentication_status"):
                    s.quantity AS 'Qty', s.unit_sale_price AS 'Sold Price/Unit', 
                    s.gross_total AS 'Gross Rev', s.sale_type AS 'Type', 
                    s.shipping_cost AS 'Shipping Cost', s.net_total AS 'Net Revenue',
-                   s.net_profit AS 'Net Profit', s.payment_method AS 'Payment Method'
+                   s.net_profit AS 'Net Profit', s.payment_method AS 'Payment Method',
+                   s.notes AS 'Comments / Notes'
             FROM sales s 
             JOIN products p ON s.product_id = p.id
             ORDER BY s.sale_date DESC
+        """,
+            conn,
+        )
+
+        # Fetch Units Sold per Product
+        units_sold_df = pd.read_sql_query(
+            """
+            SELECT p.id AS 'ID', p.name AS 'Product Name', p.sku AS 'SKU',
+                   p.stock AS 'In Stock',
+                   COALESCE(SUM(s.quantity), 0) AS 'Total Units Sold'
+            FROM products p
+            LEFT JOIN sales s ON p.id = s.product_id
+            GROUP BY p.id
+            ORDER BY 'Total Units Sold' DESC
         """,
             conn,
         )
@@ -151,24 +174,28 @@ elif st.session_state.get("authentication_status"):
         total_products = len(products_df)
         gross_rev = sales_df["Gross Rev"].sum() if not sales_df.empty else 0.0
         net_profit = sales_df["Net Profit"].sum() if not sales_df.empty else 0.0
-        net_margin = (net_profit / gross_rev * 100) if gross_rev > 0 else 0.0
-        low_stock = (
-            len(products_df[products_df["stock"] < 5])
-            if not products_df.empty
-            else 0
-        )
+        total_units_sold_all = units_sold_df["Total Units Sold"].sum() if not units_sold_df.empty else 0
 
         m1.metric("Total Products", total_products)
         m2.metric("Gross Revenue", f"${gross_rev:,.2f}")
-        m3.metric("Net Profit", f"${net_profit:,.2f}", delta=f"{net_margin:.1f}% Margin")
-        m4.metric("Low Stock Items (<5)", low_stock)
+        m3.metric("Net Profit", f"${net_profit:,.2f}")
+        m4.metric("Total Units Sold", f"{total_units_sold_all:,} Units")
+
+        st.markdown("---")
+
+        # UNITS SOLD SUMMARY TABLE
+        st.subheader("📊 Product Sales Performance & Stock")
+        if not units_sold_df.empty:
+            st.dataframe(units_sold_df, use_container_width=True)
+        else:
+            st.info("No products found.")
 
         st.markdown("---")
 
         st.subheader("📥 Export Reports")
         if not products_df.empty or not sales_df.empty:
             excel_data = generate_excel_bytes(
-                {"Inventory": products_df, "Sales Ledger": sales_df}
+                {"Inventory": products_df, "Sales Ledger": sales_df, "Units Sold Summary": units_sold_df}
             )
             st.download_button(
                 label="📊 Download Complete NawatCore Excel Report (.xlsx)",
@@ -179,31 +206,6 @@ elif st.session_state.get("authentication_status"):
             )
         else:
             st.info("Add products or log sales to enable Master Excel download.")
-
-        st.markdown("---")
-        st.subheader("Current Stock & Profitability")
-        if not products_df.empty:
-            display_df = products_df.copy()
-            # Calculate % Markup per item
-            display_df["Markup %"] = (
-                (display_df["default_price"] - display_df["landed_cost"])
-                / display_df["landed_cost"].replace(0, 1)
-                * 100
-            ).round(1).astype(str) + "%"
-
-            display_df = display_df.rename(
-                columns={
-                    "id": "ID",
-                    "name": "Product Name",
-                    "sku": "SKU",
-                    "landed_cost": "Landed Cost ($)",
-                    "default_price": "Selling Price ($)",
-                    "stock": "In Stock",
-                }
-            )[["ID", "Product Name", "SKU", "Landed Cost ($)", "Selling Price ($)", "Markup %", "In Stock"]]
-            st.dataframe(display_df, use_container_width=True)
-        else:
-            st.info("No products added yet. Head to 'Manage Inventory' to start!")
 
     # -------------------------------------------------------------------
     # TAB 2: MANAGE INVENTORY
@@ -254,6 +256,10 @@ elif st.session_state.get("authentication_status"):
         conn.close()
 
         if not inv_df.empty:
+            st.markdown("---")
+            st.subheader("Current Stock & Pricing")
+            st.dataframe(inv_df, use_container_width=True)
+
             st.markdown("---")
             st.subheader("📥 Export Inventory")
             inv_excel = generate_excel_bytes({"Inventory": inv_df})
@@ -325,6 +331,11 @@ elif st.session_state.get("authentication_status"):
                     transaction_date, transaction_time
                 ).strftime("%Y-%m-%d %H:%M:%S")
 
+            sale_notes = st.text_input(
+                "Order Notes / Comments (Optional)",
+                placeholder="e.g., Customer: John Doe, Local pickup at 3 PM, 10% discount applied",
+            )
+
             gross_total = sale_qty * actual_unit_price
             net_total = gross_total - shipping_cost
             total_landed_cost = sale_qty * item["landed_cost"]
@@ -354,8 +365,8 @@ elif st.session_state.get("authentication_status"):
                     c.execute(
                         """
                         INSERT INTO sales 
-                        (product_id, quantity, unit_sale_price, gross_total, sale_type, shipping_cost, net_total, landed_cost_total, net_profit, payment_method, sale_date)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        (product_id, quantity, unit_sale_price, gross_total, sale_type, shipping_cost, net_total, landed_cost_total, net_profit, payment_method, sale_date, notes)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                         (
                             item["id"],
@@ -369,6 +380,7 @@ elif st.session_state.get("authentication_status"):
                             net_profit,
                             payment_method,
                             sale_timestamp,
+                            sale_notes.strip(),
                         ),
                     )
 
@@ -381,7 +393,7 @@ elif st.session_state.get("authentication_status"):
             st.info("Add products to inventory before logging sales.")
 
     # -------------------------------------------------------------------
-    # TAB 4: SALES HISTORY, RETURNS & VOIDING SALES
+    # TAB 4: SALES HISTORY, FILTERS, RETURNS & VOIDING SALES
     # -------------------------------------------------------------------
     with tabs[3]:
         st.header("NawatCore Sales Ledger & Order Management")
@@ -392,7 +404,8 @@ elif st.session_state.get("authentication_status"):
                    s.quantity AS 'Qty', s.unit_sale_price AS 'Sold Price/Unit', 
                    s.gross_total AS 'Gross Rev', s.sale_type AS 'Type', 
                    s.shipping_cost AS 'Shipping Cost', s.net_total AS 'Net Revenue',
-                   s.net_profit AS 'Net Profit', s.payment_method AS 'Payment Method'
+                   s.net_profit AS 'Net Profit', s.payment_method AS 'Payment Method',
+                   s.notes AS 'Comments / Notes'
             FROM sales s 
             JOIN products p ON s.product_id = p.id
             ORDER BY s.sale_date DESC
@@ -402,15 +415,74 @@ elif st.session_state.get("authentication_status"):
         conn.close()
 
         if not sales_raw.empty:
-            # Add Profit Margin % Column
-            display_ledger = sales_raw.copy()
+            # Convert Date & Time column to datetime for filtering
+            sales_raw['parsed_date'] = pd.to_datetime(sales_raw['Date & Time']).dt.date
+
+            # --- FILTER SECTION ---
+            st.subheader("🔍 Filter Sales Ledger")
+            col_f1, col_f2, col_f3, col_f4 = st.columns(4)
+
+            # 1. Date Range Filter
+            min_date = sales_raw['parsed_date'].min()
+            max_date = sales_raw['parsed_date'].max()
+            with col_f1:
+                start_date = st.date_input("Start Date", min_date)
+                end_date = st.date_input("End Date", max_date)
+
+            # 2. Product Filter
+            all_products = ["All Products"] + sorted(list(sales_raw['Product'].unique()))
+            with col_f2:
+                selected_prod = st.selectbox("Product", all_products)
+
+            # 3. Sale Channel Filter
+            with col_f3:
+                selected_channel = st.selectbox("Sale Channel", ["All Channels", "Local", "Online"])
+
+            # 4. Payment Method Filter
+            all_payments = ["All Payment Methods"] + sorted(list(sales_raw['Payment Method'].unique()))
+            with col_f4:
+                selected_payment = st.selectbox("Payment Method", all_payments)
+
+            # Apply Filters
+            filtered_df = sales_raw.copy()
+
+            # Date filter
+            filtered_df = filtered_df[
+                (filtered_df['parsed_date'] >= start_date) & 
+                (filtered_df['parsed_date'] <= end_date)
+            ]
+
+            # Product filter
+            if selected_prod != "All Products":
+                filtered_df = filtered_df[filtered_df['Product'] == selected_prod]
+
+            # Channel filter
+            if selected_channel != "All Channels":
+                filtered_df = filtered_df[filtered_df['Type'] == selected_channel]
+
+            # Payment filter
+            if selected_payment != "All Payment Methods":
+                filtered_df = filtered_df[filtered_df['Payment Method'] == selected_payment]
+
+            # Show Filtered Summary Metrics
+            f_rev = filtered_df['Gross Rev'].sum() if not filtered_df.empty else 0.0
+            f_profit = filtered_df['Net Profit'].sum() if not filtered_df.empty else 0.0
+            f_units = filtered_df['Qty'].sum() if not filtered_df.empty else 0
+
+            st.markdown(
+                f"**Filter Summary:** Found **{len(filtered_df)}** transactions | **{f_units}** Units Sold | **${f_rev:,.2f}** Gross Rev | **${f_profit:,.2f}** Net Profit"
+            )
+
+            # Display Table
+            display_ledger = filtered_df.copy()
             display_ledger["Margin %"] = (
                 (display_ledger["Net Profit"] / display_ledger["Gross Rev"].replace(0, 1)) * 100
             ).round(1).astype(str) + "%"
 
             cols_to_show = [
                 'Sale ID', 'Date & Time', 'Product', 'Qty', 'Sold Price/Unit',
-                'Gross Rev', 'Shipping Cost', 'Net Revenue', 'Net Profit', 'Margin %', 'Payment Method', 'Type'
+                'Gross Rev', 'Shipping Cost', 'Net Revenue', 'Net Profit', 'Margin %', 
+                'Payment Method', 'Type', 'Comments / Notes'
             ]
             st.dataframe(display_ledger[cols_to_show], use_container_width=True)
 
@@ -439,14 +511,12 @@ elif st.session_state.get("authentication_status"):
                     conn = get_connection()
                     c = conn.cursor()
 
-                    # Step 1: Restore stock if requested
                     if "Return item(s) to inventory" in return_to_stock:
                         c.execute(
                             "UPDATE products SET stock = stock + ? WHERE id = ?",
                             (selected_sale["Qty"], selected_sale["product_id"])
                         )
 
-                    # Step 2: Delete transaction from database
                     c.execute("DELETE FROM sales WHERE id = ?", (selected_sale["Sale ID"],))
                     conn.commit()
                     conn.close()
@@ -455,12 +525,12 @@ elif st.session_state.get("authentication_status"):
                     st.rerun()
 
             st.markdown("---")
-            st.subheader("📥 Export Sales Ledger")
-            sales_excel = generate_excel_bytes({"Sales Ledger": display_ledger[cols_to_show]})
+            st.subheader("📥 Export Filtered Sales Ledger")
+            sales_excel = generate_excel_bytes({"Filtered Sales": display_ledger[cols_to_show]})
             st.download_button(
-                label="🛒 Download NawatCore Sales Ledger Excel (.xlsx)",
+                label="🛒 Download Filtered Sales Excel (.xlsx)",
                 data=sales_excel,
-                file_name=f"NawatCore_Sales_Ledger_{datetime.now().strftime('%Y%m%d')}.xlsx",
+                file_name=f"NawatCore_Filtered_Sales_{datetime.now().strftime('%Y%m%d')}.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             )
         else:
