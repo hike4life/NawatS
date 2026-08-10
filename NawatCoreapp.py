@@ -25,9 +25,16 @@ def generate_excel_bytes(dataframes_dict):
 
 
 # --- 1. USER LOGIN CONFIGURATION (STREAMLIT SECRETS) ---
+def secrets_to_dict(obj):
+    """Recursively converts Streamlit AttrDict objects into standard Python dicts."""
+    if hasattr(obj, "items"):
+        return {k: secrets_to_dict(v) for k, v in obj.items()}
+    return obj
+
+
 try:
-    raw_credentials = dict(st.secrets["credentials"])
-    credentials = json.loads(json.dumps(raw_credentials))
+    # Recursively convert st.secrets into a standard mutable dictionary
+    credentials = secrets_to_dict(st.secrets["credentials"])
     stauth.Hasher.hash_passwords(credentials)
 except Exception as e:
     st.error(f"⚠️ Secrets configuration error: {e}")
@@ -39,7 +46,6 @@ authenticator = stauth.Authenticate(
     key="secret_auth_key_12345",
     cookie_expiry_days=30,
 )
-
 # --- LOGIN SCREEN HEADER ---
 st.title("🏢 NawatCore")
 st.caption("Official Inventory & Sales Management Portal")
