@@ -205,17 +205,18 @@ elif st.session_state.get("authentication_status"):
                 
                 restock_submit = st.form_submit_button("📥 Add Stock to Inventory", type="primary")
                 if restock_submit:
-                    payload = {
-                        "action": "restockProduct",
-                        "product_id": int(restock_item["id"]),
-                        "added_qty": int(added_stock)
-                    }
-                    success, message = send_to_google_sheet(payload)
-                    if success:
-                        st.success(f"Successfully added **+{added_stock} units** to **{restock_item['name']}**! New Stock: {int(restock_item['stock']) + added_stock}")
-                        st.rerun()
-                    else:
-                        st.error(f"Failed to update restock in Google Sheets: {message}")
+                    with st.spinner("Updating inventory in Google Sheets..."):
+                        payload = {
+                            "action": "restockProduct",
+                            "product_id": int(restock_item["id"]),
+                            "added_qty": int(added_stock)
+                        }
+                        success, message = send_to_google_sheet(payload)
+                        if success:
+                            st.success(f"Successfully added **+{added_stock} units** to **{restock_item['name']}**! New Stock: {int(restock_item['stock']) + added_stock}")
+                            st.rerun()
+                        else:
+                            st.error(f"Failed to update restock in Google Sheets: {message}")
 
             st.markdown("---")
 
@@ -235,17 +236,18 @@ elif st.session_state.get("authentication_status"):
                     if p_name.strip() in inv_df["name"].astype(str).values:
                         st.error("A product with this name already exists in Google Sheets.")
                     else:
-                        next_id = int(inv_df["id"].max() + 1) if not inv_df.empty and "id" in inv_df.columns else 1
-                        payload = {
-                            "action": "addProduct",
-                            "row": [next_id, p_name.strip(), p_sku.strip(), p_landed_cost, p_default_price, p_stock]
-                        }
-                        success, message = send_to_google_sheet(payload)
-                        if success:
-                            st.success(f"Added **{p_name}** permanently to Google Sheets!")
-                            st.rerun()
-                        else:
-                            st.error(f"Failed to write to Google Sheets: {message}")
+                        with st.spinner("Adding new product to Google Sheets..."):
+                            next_id = int(inv_df["id"].max() + 1) if not inv_df.empty and "id" in inv_df.columns else 1
+                            payload = {
+                                "action": "addProduct",
+                                "row": [next_id, p_name.strip(), p_sku.strip(), p_landed_cost, p_default_price, p_stock]
+                            }
+                            success, message = send_to_google_sheet(payload)
+                            if success:
+                                st.success(f"Added **{p_name}** permanently to Google Sheets!")
+                                st.rerun()
+                            else:
+                                st.error(f"Failed to write to Google Sheets: {message}")
                 else:
                     st.warning("Please enter a valid product name.")
 
@@ -305,26 +307,27 @@ elif st.session_state.get("authentication_status"):
                 st.error("This item is currently out of stock.")
             else:
                 if st.button("Complete Sale", type="primary"):
-                    sales_df_current = load_sales_df()
-                    next_sale_id = int(sales_df_current["id"].max() + 1) if not sales_df_current.empty and "id" in sales_df_current.columns else 1
+                    with st.spinner("Logging sale to Google Sheets..."):
+                        sales_df_current = load_sales_df()
+                        next_sale_id = int(sales_df_current["id"].max() + 1) if not sales_df_current.empty and "id" in sales_df_current.columns else 1
 
-                    payload = {
-                        "action": "addSale",
-                        "product_id": int(item["id"]),
-                        "qty": sale_qty,
-                        "row": [
-                            next_sale_id, int(item["id"]), sale_qty, actual_unit_price,
-                            gross_total, sale_type, shipping_cost, net_total,
-                            total_landed_cost, net_profit, payment_method,
-                            sale_timestamp, sale_notes.strip()
-                        ]
-                    }
-                    success, message = send_to_google_sheet(payload)
-                    if success:
-                        st.success("Sale logged permanently in Google Sheets!")
-                        st.rerun()
-                    else:
-                        st.error(f"Failed to write sale to Google Sheets: {message}")
+                        payload = {
+                            "action": "addSale",
+                            "product_id": int(item["id"]),
+                            "qty": sale_qty,
+                            "row": [
+                                next_sale_id, int(item["id"]), sale_qty, actual_unit_price,
+                                gross_total, sale_type, shipping_cost, net_total,
+                                total_landed_cost, net_profit, payment_method,
+                                sale_timestamp, sale_notes.strip()
+                            ]
+                        }
+                        success, message = send_to_google_sheet(payload)
+                        if success:
+                            st.success("Sale logged permanently in Google Sheets!")
+                            st.rerun()
+                        else:
+                            st.error(f"Failed to write sale to Google Sheets: {message}")
         else:
             st.info("Add products to inventory before logging sales.")
 
@@ -451,23 +454,24 @@ elif st.session_state.get("authentication_status"):
 
                 btn_edit = st.form_submit_button("💾 Save Updated Sale Record", type="primary")
                 if btn_edit:
-                    payload = {
-                        "action": "editSale",
-                        "sale_id": int(s_edit["Sale ID"]),
-                        "product_id": int(s_edit["product_id"]),
-                        "qty_diff": qty_difference,
-                        "row": [
-                            int(s_edit["Sale ID"]), int(s_edit["product_id"]), e_qty, e_unit_price,
-                            e_gross, e_type, e_shipping, e_net,
-                            e_landed_total, e_profit, e_payment,
-                            e_timestamp, e_notes.strip()
-                        ]
-                    }
-                    success, message = send_to_google_sheet(payload)
-                    if success:
-                        st.success(f"Sale ID #{s_edit['Sale ID']} updated successfully in Google Sheets!")
-                        st.rerun()
-                    else:
-                        st.error(f"Failed to update sale record: {message}")
+                    with st.spinner("Updating sale record in Google Sheets..."):
+                        payload = {
+                            "action": "editSale",
+                            "sale_id": int(s_edit["Sale ID"]),
+                            "product_id": int(s_edit["product_id"]),
+                            "qty_diff": qty_difference,
+                            "row": [
+                                int(s_edit["Sale ID"]), int(s_edit["product_id"]), e_qty, e_unit_price,
+                                e_gross, e_type, e_shipping, e_net,
+                                e_landed_total, e_profit, e_payment,
+                                e_timestamp, e_notes.strip()
+                            ]
+                        }
+                        success, message = send_to_google_sheet(payload)
+                        if success:
+                            st.success(f"Sale ID #{s_edit['Sale ID']} updated successfully in Google Sheets!")
+                            st.rerun()
+                        else:
+                            st.error(f"Failed to update sale record: {message}")
         else:
             st.info("No sales recorded yet.")
