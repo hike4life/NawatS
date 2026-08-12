@@ -15,6 +15,16 @@ st.set_page_config(
 # --- GOOGLE SHEETS WEBHOOK API HELPERS ---
 API_URL = st.secrets.get("SHEET_API_URL", "")
 
+DEFAULT_CATEGORIES = [
+    "Portafilters - 58mm",
+    "Portafilters - 54mm",
+    "Portafilters - 51mm / Other",
+    "Coffee Grinders",
+    "Coffee Filters & Screens",
+    "Electronic Utility Dusters",
+    "General Accessories",
+]
+
 def fetch_sheet_data(action):
     """Fetches data directly from Google Apps Script Webhook."""
     if not API_URL:
@@ -36,8 +46,11 @@ def load_products_df(force_reload=False):
     if "products_df" not in st.session_state or force_reload:
         df = fetch_sheet_data("getInventory")
         if df.empty or "id" not in df.columns:
-            st.session_state["products_df"] = pd.DataFrame(columns=["id", "name", "sku", "landed_cost", "default_price", "stock"])
+            st.session_state["products_df"] = pd.DataFrame(columns=["id", "name", "sku", "category", "landed_cost", "default_price", "stock"])
         else:
+            if "category" not in df.columns:
+                df["category"] = "General Accessories"
+            df["category"] = df["category"].fillna("General Accessories").astype(str)
             df["id"] = pd.to_numeric(df["id"], errors='coerce').fillna(0).astype(int)
             df["landed_cost"] = pd.to_numeric(df["landed_cost"], errors='coerce').fillna(0.0)
             df["default_price"] = pd.to_numeric(df["default_price"], errors='coerce').fillna(0.0)
@@ -131,7 +144,7 @@ elif st.session_state.get("authentication_status"):
 
     tabs = st.tabs([
         "📊 Dashboard",
-        "➕ Manage Inventory & Restock",
+        "➕ Manage Inventory & Edit Items",
         "🛒 Log Sales",
         "📜 Sales History & Edit Transactions",
     ])
@@ -153,8 +166,8 @@ elif st.session_state.get("authentication_status"):
                 units_sold_df = products_df.copy()
                 units_sold_df["Total Units Sold"] = 0
             
-            units_display = units_sold_df[["id", "name", "sku", "stock", "Total Units Sold"]].rename(
-                columns={"id": "ID", "name": "Product Name", "sku": "SKU", "stock": "In Stock"}
+            units_display = units_sold_df[["id", "name", "sku", "category", "stock", "Total Units Sold"]].rename(
+                columns={"id": "ID", "name": "Product Name", "sku": "SKU", "category": "Category", "stock": "In Stock"}
             )
         else:
             units_display = pd.DataFrame()
@@ -194,14 +207,69 @@ elif st.session_state.get("authentication_status"):
             )
 
     # -------------------------------------------------------------------
-    # TAB 2: MANAGE INVENTORY & RESTOCK
+    # TAB 2: MANAGE INVENTORY, EDIT & RESTOCK
     # -------------------------------------------------------------------
     with tabs[1]:
         st.header("Inventory Management")
         inv_df = load_products_df()
 
-        # RESTOCK
+        # Build master category options
+        existing_cats = sorted(list(set(inv_df["category"].dropna().unique().tolist() + DEFAULT_CATEGORIES)))
+
+        # SECTION A: EDIT EXISTING INVENTORY ITEM DETAILS / FIX PRICE
         if not inv_df.empty:
+            st.subheader("✏️ Edit Product Details (Fix Price, Name, Category, or SKU)")
+            edit_item_options = {
+                f"{row['name']} (Category: {row['category']} | Price: ${row['default_price']:.2f} | Stock: {row['stock']})": row
+                for _, row in inv_df.iterrows()
+            }
+            selected_edit_label = st.selectbox("Select Item to Update", list(edit_item_options.keys()))
+            p_edit = edit_item_options[selected_edit_label]
+
+            with st.form("edit_product_form"):
+                ec1, ec2 = st.columns(2)
+                ep_name = ec1.text_input("Product Name", value=str(p_edit["name"]))
+                ep_sku = ec2.text_input("SKU / Item Code", value=str(p_edit["sku"]))
+
+                # Category selection or custom typing
+                current_cat = str(p_edit["category"])
+                cat_idx = existing_cats.index(current_cat) if current_cat in existing_cats else 0
+                ep_cat_select = ec1.selectbox("Category", existing_cats + ["+ Add Custom Category..."], index=cat_idx)
+                if ep_cat_select == "+ Add Custom Category...":
+                    ep_cat = ec1.text_input("Enter New Category Name", value="")
+                else:
+                    ep_cat = ep_cat_select
+
+                ep_landed_cost = ec2.number_input("Landed Cost w/ Packaging ($)", min_value=0.0, value=float(p_edit["landed_cost"]), step=0.50)
+                ep_default_price = ec1.number_input("Default Set Selling Price ($)", min_value=0.0, value=float(p_edit["default_price"]), step=0.50)
+                ep_stock = ec2.number_input("Current Stock Count", min_value=0, value=int(p_edit["stock"]), step=1)
+
+                btn_save_prod = st.form_submit_button("💾 Save Product Details", type="primary")
+                if btn_save_prod:
+                    final_cat = ep_cat.strip() if ep_cat.strip() else "General Accessories"
+                    
+                    # Update memory instantly
+                    idx = st.session_state["products_df"].index[st.session_state["products_df"]["id"] == int(p_edit["id"])].tolist()
+                    if idx:
+                        st.session_state["products_df"].loc[idx[0]] = [
+                            int(p_edit["id"]), ep_name.strip(), ep_sku.strip(),
+                            final_cat, ep_landed_cost, ep_default_price, ep_stock
+                        ]
+
+                    # Sync to Google Sheets
+                    payload = {
+                        "action": "editProduct",
+                        "product_id": int(p_edit["id"]),
+                        "row": [int(p_edit["id"]), ep_name.strip(), ep_sku.strip(), final_cat, ep_landed_cost, ep_default_price, ep_stock]
+                    }
+                    send_to_google_sheet(payload)
+
+                    st.toast(f"Updated **{ep_name}** successfully!", icon="✏️")
+                    st.rerun()
+
+            st.markdown("---")
+
+            # SECTION B: RESTOCK
             st.subheader("🔄 Restock Existing Inventory Item")
             with st.form("restock_product_form", clear_on_submit=True):
                 restock_options = {
@@ -215,12 +283,10 @@ elif st.session_state.get("authentication_status"):
                 
                 restock_submit = st.form_submit_button("📥 Add Stock to Inventory", type="primary")
                 if restock_submit:
-                    # 1. Update memory instantly
                     idx = st.session_state["products_df"].index[st.session_state["products_df"]["id"] == int(restock_item["id"])].tolist()
                     if idx:
                         st.session_state["products_df"].at[idx[0], "stock"] += int(added_stock)
 
-                    # 2. Sync to Google Sheets
                     payload = {
                         "action": "restockProduct",
                         "product_id": int(restock_item["id"]),
@@ -233,15 +299,22 @@ elif st.session_state.get("authentication_status"):
 
             st.markdown("---")
 
-        # ADD NEW PRODUCT
+        # SECTION C: ADD NEW PRODUCT WITH CATEGORY
         st.subheader("➕ Add Brand New Product to Inventory")
         with st.form("add_product_form", clear_on_submit=True):
             col_a, col_b = st.columns(2)
             p_name = col_a.text_input("Product Name")
             p_sku = col_b.text_input("SKU / Item Code")
-            p_landed_cost = col_a.number_input("Landed Cost w/ Packaging ($)", min_value=0.0, step=0.50)
-            p_default_price = col_b.number_input("Default Set Selling Price ($)", min_value=0.0, step=0.50)
-            p_stock = col_a.number_input("Initial Stock", min_value=0, step=1)
+
+            p_cat_select = col_a.selectbox("Category", existing_cats + ["+ Add Custom Category..."])
+            if p_cat_select == "+ Add Custom Category...":
+                p_cat = col_a.text_input("Enter Custom Category Name")
+            else:
+                p_cat = p_cat_select
+
+            p_landed_cost = col_b.number_input("Landed Cost w/ Packaging ($)", min_value=0.0, step=0.50)
+            p_default_price = col_a.number_input("Default Set Selling Price ($)", min_value=0.0, step=0.50)
+            p_stock = col_b.number_input("Initial Stock", min_value=0, step=1)
 
             submit = st.form_submit_button("Add New Product")
             if submit:
@@ -249,19 +322,19 @@ elif st.session_state.get("authentication_status"):
                     if p_name.strip() in inv_df["name"].astype(str).values:
                         st.error("A product with this name already exists in Google Sheets.")
                     else:
+                        final_add_cat = p_cat.strip() if p_cat.strip() else "General Accessories"
                         next_id = int(inv_df["id"].max() + 1) if not inv_df.empty and "id" in inv_df.columns else 1
                         new_row = {
                             "id": next_id, "name": p_name.strip(), "sku": p_sku.strip(),
-                            "landed_cost": p_landed_cost, "default_price": p_default_price, "stock": p_stock
+                            "category": final_add_cat, "landed_cost": p_landed_cost, 
+                            "default_price": p_default_price, "stock": p_stock
                         }
                         
-                        # Update memory instantly
                         st.session_state["products_df"] = pd.concat([st.session_state["products_df"], pd.DataFrame([new_row])], ignore_index=True)
 
-                        # Sync to Google Sheets
                         payload = {
                             "action": "addProduct",
-                            "row": [next_id, p_name.strip(), p_sku.strip(), p_landed_cost, p_default_price, p_stock]
+                            "row": [next_id, p_name.strip(), p_sku.strip(), final_add_cat, p_landed_cost, p_default_price, p_stock]
                         }
                         send_to_google_sheet(payload)
 
@@ -276,89 +349,101 @@ elif st.session_state.get("authentication_status"):
             st.dataframe(inv_df, width="stretch")
 
     # -------------------------------------------------------------------
-    # TAB 3: LOG SALES
+    # TAB 3: LOG SALES WITH CATEGORY FILTER
     # -------------------------------------------------------------------
     with tabs[2]:
         st.header("Record a NawatCore Transaction")
         products_df = load_products_df()
 
         if not products_df.empty:
-            product_options = {
-                f"{row['name']} (Stock: {row['stock']} | Landed Cost: ${row['landed_cost']:.2f} | Set Price: ${row['default_price']:.2f})": row
-                for _, row in products_df.iterrows()
-            }
-            selected_option = st.selectbox("Select Item", list(product_options.keys()))
-            item = product_options[selected_option]
+            st.subheader("🔍 Narrow Search by Category")
+            available_categories = ["All Categories"] + sorted(list(products_df["category"].dropna().unique()))
+            selected_cat_filter = st.selectbox("Filter Product List by Category", available_categories)
 
-            col1, col2 = st.columns(2)
-
-            with col1:
-                sale_qty = st.number_input("Quantity Sold", min_value=1, max_value=int(item["stock"]) if item["stock"] > 0 else 1, step=1)
-                actual_unit_price = st.number_input("Actual Sale Price per Unit ($)", min_value=0.0, value=float(item["default_price"]), step=0.50)
-                sale_type = st.radio("Sale Channel", ["Local", "Online"], horizontal=True)
-                shipping_cost = 0.0
-                if sale_type == "Online":
-                    shipping_cost = st.number_input("Shipping Paid by You ($)", min_value=0.0, value=0.0, step=0.50)
-
-            with col2:
-                payment_method = st.selectbox("Payment Method", ["Cash", "Zelle", "Venmo", "Apple Pay", "Cash App", "Other"])
-                transaction_date = st.date_input("Transaction Date", datetime.now())
-                transaction_time = st.time_input("Transaction Time", datetime.now().time())
-                sale_timestamp = datetime.combine(transaction_date, transaction_time).strftime("%Y-%m-%d %H:%M:%S")
-
-            sale_notes = st.text_input("Order Notes / Comments (Optional)", placeholder="Customer name, pickup info, etc.")
-
-            gross_total = sale_qty * actual_unit_price
-            net_total = gross_total - shipping_cost
-            total_landed_cost = sale_qty * item["landed_cost"]
-            net_profit = net_total - total_landed_cost
-            item_profit_margin = (net_profit / gross_total * 100) if gross_total > 0 else 0.0
-
-            st.markdown("---")
-            st.subheader("Transaction Summary Breakdown")
-            sc1, sc2, sc3, sc4 = st.columns(4)
-            sc1.metric("Gross Revenue", f"${gross_total:,.2f}")
-            sc2.metric("Shipping Deducted", f"-${shipping_cost:,.2f}")
-            sc3.metric("Net Sales", f"${net_total:,.2f}")
-            sc4.metric("Net Profit", f"${net_profit:,.2f}", delta=f"{item_profit_margin:.1f}% Margin")
-
-            if item["stock"] <= 0:
-                st.error("This item is currently out of stock.")
+            if selected_cat_filter != "All Categories":
+                filtered_products_df = products_df[products_df["category"] == selected_cat_filter]
             else:
-                if st.button("Complete Sale", type="primary"):
-                    sales_df_mem = load_sales_df()
-                    next_sale_id = int(sales_df_mem["id"].max() + 1) if not sales_df_mem.empty and "id" in sales_df_mem.columns else 1
+                filtered_products_df = products_df
 
-                    new_sale_row = {
-                        "id": next_sale_id, "product_id": int(item["id"]), "quantity": sale_qty,
-                        "unit_sale_price": actual_unit_price, "gross_total": gross_total,
-                        "sale_type": sale_type, "shipping_cost": shipping_cost, "net_total": net_total,
-                        "landed_cost_total": total_landed_cost, "net_profit": net_profit,
-                        "payment_method": payment_method, "sale_date": sale_timestamp, "notes": sale_notes.strip()
-                    }
+            if not filtered_products_df.empty:
+                product_options = {
+                    f"[{row['category']}] {row['name']} (Stock: {row['stock']} | Set Price: ${row['default_price']:.2f})": row
+                    for _, row in filtered_products_df.iterrows()
+                }
+                selected_option = st.selectbox("Select Item to Sell", list(product_options.keys()))
+                item = product_options[selected_option]
 
-                    # 1. Update memory instantly
-                    st.session_state["sales_df"] = pd.concat([st.session_state["sales_df"], pd.DataFrame([new_sale_row])], ignore_index=True)
-                    p_idx = st.session_state["products_df"].index[st.session_state["products_df"]["id"] == int(item["id"])].tolist()
-                    if p_idx:
-                        st.session_state["products_df"].at[p_idx[0], "stock"] -= sale_qty
+                col1, col2 = st.columns(2)
 
-                    # 2. Sync to Google Sheets
-                    payload = {
-                        "action": "addSale",
-                        "product_id": int(item["id"]),
-                        "qty": sale_qty,
-                        "row": [
-                            next_sale_id, int(item["id"]), sale_qty, actual_unit_price,
-                            gross_total, sale_type, shipping_cost, net_total,
-                            total_landed_cost, net_profit, payment_method,
-                            sale_timestamp, sale_notes.strip()
-                        ]
-                    }
-                    send_to_google_sheet(payload)
+                with col1:
+                    sale_qty = st.number_input("Quantity Sold", min_value=1, max_value=int(item["stock"]) if item["stock"] > 0 else 1, step=1)
+                    actual_unit_price = st.number_input("Actual Sale Price per Unit ($)", min_value=0.0, value=float(item["default_price"]), step=0.50)
+                    sale_type = st.radio("Sale Channel", ["Local", "Online"], horizontal=True)
+                    shipping_cost = 0.0
+                    if sale_type == "Online":
+                        shipping_cost = st.number_input("Shipping Paid by You ($)", min_value=0.0, value=0.0, step=0.50)
 
-                    st.toast("Sale logged permanently!", icon="🛒")
-                    st.rerun()
+                with col2:
+                    payment_method = st.selectbox("Payment Method", ["Cash", "Zelle", "Venmo", "Apple Pay", "Cash App", "Other"])
+                    transaction_date = st.date_input("Transaction Date", datetime.now())
+                    transaction_time = st.time_input("Transaction Time", datetime.now().time())
+                    sale_timestamp = datetime.combine(transaction_date, transaction_time).strftime("%Y-%m-%d %H:%M:%S")
+
+                sale_notes = st.text_input("Order Notes / Comments (Optional)", placeholder="Customer name, pickup info, etc.")
+
+                gross_total = sale_qty * actual_unit_price
+                net_total = gross_total - shipping_cost
+                total_landed_cost = sale_qty * float(item["landed_cost"])
+                net_profit = net_total - total_landed_cost
+                item_profit_margin = (net_profit / gross_total * 100) if gross_total > 0 else 0.0
+
+                st.markdown("---")
+                st.subheader("Transaction Summary Breakdown")
+                sc1, sc2, sc3, sc4 = st.columns(4)
+                sc1.metric("Gross Revenue", f"${gross_total:,.2f}")
+                sc2.metric("Shipping Deducted", f"-${shipping_cost:,.2f}")
+                sc3.metric("Net Sales", f"${net_total:,.2f}")
+                sc4.metric("Net Profit", f"${net_profit:,.2f}", delta=f"{item_profit_margin:.1f}% Margin")
+
+                if item["stock"] <= 0:
+                    st.error("This item is currently out of stock.")
+                else:
+                    if st.button("Complete Sale", type="primary"):
+                        sales_df_mem = load_sales_df()
+                        next_sale_id = int(sales_df_mem["id"].max() + 1) if not sales_df_mem.empty and "id" in sales_df_mem.columns else 1
+
+                        new_sale_row = {
+                            "id": next_sale_id, "product_id": int(item["id"]), "quantity": sale_qty,
+                            "unit_sale_price": actual_unit_price, "gross_total": gross_total,
+                            "sale_type": sale_type, "shipping_cost": shipping_cost, "net_total": net_total,
+                            "landed_cost_total": total_landed_cost, "net_profit": net_profit,
+                            "payment_method": payment_method, "sale_date": sale_timestamp, "notes": sale_notes.strip()
+                        }
+
+                        # Update memory instantly
+                        st.session_state["sales_df"] = pd.concat([st.session_state["sales_df"], pd.DataFrame([new_sale_row])], ignore_index=True)
+                        p_idx = st.session_state["products_df"].index[st.session_state["products_df"]["id"] == int(item["id"])].tolist()
+                        if p_idx:
+                            st.session_state["products_df"].at[p_idx[0], "stock"] -= sale_qty
+
+                        # Sync to Google Sheets
+                        payload = {
+                            "action": "addSale",
+                            "product_id": int(item["id"]),
+                            "qty": sale_qty,
+                            "row": [
+                                next_sale_id, int(item["id"]), sale_qty, actual_unit_price,
+                                gross_total, sale_type, shipping_cost, net_total,
+                                total_landed_cost, net_profit, payment_method,
+                                sale_timestamp, sale_notes.strip()
+                            ]
+                        }
+                        send_to_google_sheet(payload)
+
+                        st.toast("Sale logged permanently!", icon="🛒")
+                        st.rerun()
+            else:
+                st.warning("No products found in this category.")
         else:
             st.info("Add products to inventory before logging sales.")
 
@@ -371,11 +456,9 @@ elif st.session_state.get("authentication_status"):
         sales_raw_df = load_sales_df()
 
         if not sales_raw_df.empty and not products_df.empty and "product_id" in sales_raw_df.columns:
-            # Ensure integer matching before merge
             sales_raw_df["product_id"] = pd.to_numeric(sales_raw_df["product_id"], errors='coerce').fillna(0).astype(int)
             products_df["id"] = pd.to_numeric(products_df["id"], errors='coerce').fillna(0).astype(int)
 
-            # Left join ensures NO sale records are ever dropped if product lookup differs
             sales_merged = sales_raw_df.merge(
                 products_df[["id", "name", "landed_cost"]], left_on="product_id", right_on="id", how="left", suffixes=("", "_prod")
             ).rename(columns={
@@ -388,7 +471,6 @@ elif st.session_state.get("authentication_status"):
             })
             sales_merged["Product"] = sales_merged["Product"].fillna("Unknown Product")
 
-            # Safe datetime parsing with fallback
             sales_merged['parsed_dt'] = pd.to_datetime(sales_merged['Date & Time'], errors='coerce')
             sales_merged['parsed_date'] = sales_merged['parsed_dt'].dt.date
 
@@ -416,7 +498,6 @@ elif st.session_state.get("authentication_status"):
 
             filtered_df = sales_merged.copy()
             
-            # Apply date filters safely
             if not filtered_df['parsed_date'].isna().all():
                 filtered_df = filtered_df[
                     (filtered_df['parsed_date'].isna()) | 
@@ -480,7 +561,6 @@ elif st.session_state.get("authentication_status"):
                     default_pay_idx = pay_options.index(s_edit["Payment Method"]) if s_edit["Payment Method"] in pay_options else 0
                     e_payment = ec2.selectbox("Payment Method", pay_options, index=default_pay_idx)
                     
-                    # Safe parse fallback for timestamp in form
                     parsed_dt = pd.to_datetime(s_edit["Date & Time"], errors='coerce')
                     if pd.isna(parsed_dt):
                         parsed_dt = datetime.now()
@@ -499,7 +579,6 @@ elif st.session_state.get("authentication_status"):
 
                 btn_edit = st.form_submit_button("💾 Save Updated Sale Record", type="primary")
                 if btn_edit:
-                    # Update memory cleanly
                     s_idx = st.session_state["sales_df"].index[st.session_state["sales_df"]["id"] == int(s_edit["Sale ID"])].tolist()
                     if s_idx:
                         st.session_state["sales_df"].loc[s_idx[0]] = [
@@ -508,7 +587,6 @@ elif st.session_state.get("authentication_status"):
                             float(e_landed_total), float(e_profit), str(e_payment),
                             str(e_timestamp), str(e_notes).strip()
                         ]
-                        # Re-enforce explicit data types
                         st.session_state["sales_df"]["id"] = pd.to_numeric(st.session_state["sales_df"]["id"], errors='coerce').fillna(0).astype(int)
                         st.session_state["sales_df"]["product_id"] = pd.to_numeric(st.session_state["sales_df"]["product_id"], errors='coerce').fillna(0).astype(int)
                         st.session_state["sales_df"]["quantity"] = pd.to_numeric(st.session_state["sales_df"]["quantity"], errors='coerce').fillna(0).astype(int)
@@ -518,7 +596,6 @@ elif st.session_state.get("authentication_status"):
                         if p_idx:
                             st.session_state["products_df"].at[p_idx[0], "stock"] -= qty_difference
 
-                    # Sync to Google Sheets
                     payload = {
                         "action": "editSale",
                         "sale_id": int(s_edit["Sale ID"]),
