@@ -382,33 +382,40 @@ elif st.session_state.get("authentication_status"):
                 "notes": "Comments / Notes"
             })
 
-            sales_merged['parsed_date'] = pd.to_datetime(sales_merged['Date & Time']).dt.date
+            # SAFE DATETIME PARSING WITH FALLBACK
+            sales_merged['parsed_dt'] = pd.to_datetime(sales_merged['Date & Time'], errors='coerce')
+            sales_merged['parsed_date'] = sales_merged['parsed_dt'].dt.date
 
             st.subheader("🔍 Filter Sales Ledger")
             col_f1, col_f2, col_f3, col_f4 = st.columns(4)
 
-            min_date = sales_merged['parsed_date'].min()
-            max_date = sales_merged['parsed_date'].max()
+            valid_dates = sales_merged['parsed_date'].dropna()
+            min_date = valid_dates.min() if not valid_dates.empty else datetime.now().date()
+            max_date = valid_dates.max() if not valid_dates.empty else datetime.now().date()
+
             with col_f1:
                 start_date = st.date_input("Start Date", min_date)
                 end_date = st.date_input("End Date", max_date)
 
-            all_products = ["All Products"] + sorted(list(sales_merged['Product'].unique()))
+            all_products = ["All Products"] + sorted(list(sales_merged['Product'].dropna().unique()))
             with col_f2:
                 selected_prod = st.selectbox("Product", all_products)
 
             with col_f3:
                 selected_channel = st.selectbox("Sale Channel", ["All Channels", "Local", "Online"])
 
-            all_payments = ["All Payment Methods"] + sorted(list(sales_merged['Payment Method'].unique()))
+            all_payments = ["All Payment Methods"] + sorted(list(sales_merged['Payment Method'].dropna().unique()))
             with col_f4:
                 selected_payment = st.selectbox("Payment Method", all_payments)
 
             filtered_df = sales_merged.copy()
-            filtered_df = filtered_df[
-                (filtered_df['parsed_date'] >= start_date) & 
-                (filtered_df['parsed_date'] <= end_date)
-            ]
+            
+            # Apply date filters safely
+            if not filtered_df['parsed_date'].isna().all():
+                filtered_df = filtered_df[
+                    (filtered_df['parsed_date'] >= start_date) & 
+                    (filtered_df['parsed_date'] <= end_date)
+                ]
 
             if selected_prod != "All Products":
                 filtered_df = filtered_df[filtered_df['Product'] == selected_prod]
@@ -467,7 +474,11 @@ elif st.session_state.get("authentication_status"):
                     default_pay_idx = pay_options.index(s_edit["Payment Method"]) if s_edit["Payment Method"] in pay_options else 0
                     e_payment = ec2.selectbox("Payment Method", pay_options, index=default_pay_idx)
                     
-                    parsed_dt = pd.to_datetime(s_edit["Date & Time"])
+                    # Safe parse fallback for timestamp in form
+                    parsed_dt = pd.to_datetime(s_edit["Date & Time"], errors='coerce')
+                    if pd.isna(parsed_dt):
+                        parsed_dt = datetime.now()
+
                     e_date = ec2.date_input("Transaction Date", parsed_dt.date())
                     e_time = ec2.time_input("Transaction Time", parsed_dt.time())
                     e_timestamp = datetime.combine(e_date, e_time).strftime("%Y-%m-%d %H:%M:%S")
