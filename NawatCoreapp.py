@@ -1,6 +1,6 @@
 from datetime import datetime
 import io
-import sqlite3
+import requests
 import pandas as pd
 import streamlit as st
 import streamlit_authenticator as stauth
@@ -12,24 +12,78 @@ st.set_page_config(
     page_icon="🏢",
 )
 
+# --- GOOGLE SHEETS WEBHOOK API HELPERS ---
+API_URL = st.secrets.get("SHEET_API_URL", "")
+
+def fetch_sheet_data(action):
+    """Fetches data directly from Google Apps Script Webhook."""
+    if not API_URL:
+        st.error("⚠️ SHEET_API_URL missing from Streamlit Secrets!")
+        return pd.DataFrame()
+    try:
+        res = requests.get(f"{API_URL}?action={action}", timeout=10)
+        data = res.json()
+        if len(data) > 1:
+            df = pd.DataFrame(data[1:], columns=data[0])
+            return df
+        return pd.DataFrame(columns=data[0] if data else [])
+    except Exception as e:
+        st.error(f"Error connecting to Google Sheets: {e}")
+        return pd.DataFrame()
+
+def load_products_df():
+    df = fetch_sheet_data("getInventory")
+    if df.empty or "id" not in df.columns:
+        return pd.DataFrame(columns=["id", "name", "sku", "landed_cost", "default_price", "stock"])
+    df["id"] = pd.to_numeric(df["id"], errors='coerce').fillna(0).astype(int)
+    df["landed_cost"] = pd.to_numeric(df["landed_cost"], errors='coerce').fillna(0.0)
+    df["default_price"] = pd.to_numeric(df["default_price"], errors='coerce').fillna(0.0)
+    df["stock"] = pd.to_numeric(df["stock"], errors='coerce').fillna(0).astype(int)
+    return df
+
+def load_sales_df():
+    df = fetch_sheet_data("getSales")
+    if df.empty or "id" not in df.columns:
+        return pd.DataFrame(columns=[
+            "id", "product_id", "quantity", "unit_sale_price", "gross_total", 
+            "sale_type", "shipping_cost", "net_total", "landed_cost_total", 
+            "net_profit", "payment_method", "sale_date", "notes"
+        ])
+    df["id"] = pd.to_numeric(df["id"], errors='coerce').fillna(0).astype(int)
+    df["product_id"] = pd.to_numeric(df["product_id"], errors='coerce').fillna(0).astype(int)
+    df["quantity"] = pd.to_numeric(df["quantity"], errors='coerce').fillna(0).astype(int)
+    df["unit_sale_price"] = pd.to_numeric(df["unit_sale_price"], errors='coerce').fillna(0.0)
+    df["gross_total"] = pd.to_numeric(df["gross_total"], errors='coerce').fillna(0.0)
+    df["shipping_cost"] = pd.to_numeric(df["shipping_cost"], errors='coerce').fillna(0.0)
+    df["net_total"] = pd.to_numeric(df["net_total"], errors='coerce').fillna(0.0)
+    df["landed_cost_total"] = pd.to_numeric(df["landed_cost_total"], errors='coerce').fillna(0.0)
+    df["net_profit"] = pd.to_numeric(df["net_profit"], errors='coerce').fillna(0.0)
+    return df
+
+def send_to_google_sheet(payload):
+    """Sends payload to Google Sheets Webhook and returns status."""
+    try:
+        response = requests.post(API_URL, json=payload, timeout=10)
+        if response.status_code == 200:
+            return True, response.text
+        else:
+            return False, f"Server HTTP status {response.status_code}: {response.text}"
+    except Exception as e:
+        return False, str(e)
 
 # --- EXCEL GENERATOR HELPER ---
 def generate_excel_bytes(dataframes_dict):
-    """Generates an in-memory Excel file containing one or more sheets."""
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
         for sheet_name, df in dataframes_dict.items():
             df.to_excel(writer, sheet_name=sheet_name, index=False)
     return output.getvalue()
 
-
-# --- 1. USER LOGIN CONFIGURATION (STREAMLIT SECRETS) ---
+# --- 1. USER LOGIN CONFIGURATION ---
 def secrets_to_dict(obj):
-    """Recursively converts Streamlit AttrDict objects into standard Python dicts."""
     if hasattr(obj, "items"):
         return {k: secrets_to_dict(v) for k, v in obj.items()}
     return obj
-
 
 try:
     credentials = secrets_to_dict(st.secrets["credentials"])
@@ -45,7 +99,6 @@ authenticator = stauth.Authenticate(
     cookie_expiry_days=30,
 )
 
-# --- LOGIN SCREEN HEADER ---
 st.title("🏢 NawatCore")
 st.caption("Official Inventory & Sales Management Portal")
 st.markdown("---")
@@ -58,123 +111,49 @@ elif st.session_state.get("authentication_status") is None:
     st.warning("Please enter your credentials to log in to NawatCore.")
 elif st.session_state.get("authentication_status"):
 
-    # --- SIDEBAR BRANDING & LOGOUT ---
     st.sidebar.title("🏢 NawatCore")
     st.sidebar.caption("Management Console")
     st.sidebar.write(f"Logged in as: **{st.session_state['name']}**")
     authenticator.logout("Log Out", "sidebar")
 
-    # --- 2. DATABASE SETUP ---
-    DB_NAME = "inventory_sales.db"
-
-    def init_db():
-        conn = sqlite3.connect(DB_NAME)
-        c = conn.cursor()
-
-        # Products Table
-        c.execute(
-            """
-            CREATE TABLE IF NOT EXISTS products (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                name TEXT UNIQUE NOT NULL,
-                sku TEXT,
-                landed_cost REAL NOT NULL,
-                default_price REAL NOT NULL,
-                stock INTEGER NOT NULL
-            )
-        """
-        )
-
-        # Sales Table
-        c.execute(
-            """
-            CREATE TABLE IF NOT EXISTS sales (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                product_id INTEGER,
-                quantity INTEGER NOT NULL,
-                unit_sale_price REAL NOT NULL,
-                gross_total REAL NOT NULL,
-                sale_type TEXT NOT NULL,
-                shipping_cost REAL DEFAULT 0.0,
-                net_total REAL NOT NULL,
-                landed_cost_total REAL NOT NULL,
-                net_profit REAL NOT NULL,
-                payment_method TEXT NOT NULL,
-                sale_date TIMESTAMP NOT NULL,
-                FOREIGN KEY (product_id) REFERENCES products (id)
-            )
-        """
-        )
-
-        # Safe migration for notes column
-        try:
-            c.execute("ALTER TABLE sales ADD COLUMN notes TEXT DEFAULT ''")
-        except sqlite3.OperationalError:
-            pass
-
-        conn.commit()
-        conn.close()
-
-    init_db()
-
-    def get_connection():
-        return sqlite3.connect(DB_NAME)
-
-    # --- 3. MAIN APPLICATION HEADER ---
     st.title("📦 NawatCore | Inventory & Sales Management Hub")
 
-    tabs = st.tabs(
-        [
-            "📊 Dashboard",
-            "➕ Manage Inventory",
-            "🛒 Log Sales",
-            "📜 Sales History & Returns",
-        ]
-    )
+    tabs = st.tabs([
+        "📊 Dashboard",
+        "➕ Manage Inventory & Restock",
+        "🛒 Log Sales",
+        "📜 Sales History & Edit Transactions",
+    ])
 
     # -------------------------------------------------------------------
-    # TAB 1: DASHBOARD (WITH UNITS SOLD PER PRODUCT)
+    # TAB 1: DASHBOARD
     # -------------------------------------------------------------------
     with tabs[0]:
         st.header("NawatCore Business Overview")
-        conn = get_connection()
+        products_df = load_products_df()
+        sales_raw_df = load_sales_df()
 
-        products_df = pd.read_sql_query("SELECT * FROM products", conn)
-        sales_df = pd.read_sql_query(
-            """
-            SELECT s.id AS 'Sale ID', s.sale_date AS 'Date & Time', p.name AS 'Product', 
-                   s.quantity AS 'Qty', s.unit_sale_price AS 'Sold Price/Unit', 
-                   s.gross_total AS 'Gross Rev', s.sale_type AS 'Type', 
-                   s.shipping_cost AS 'Shipping Cost', s.net_total AS 'Net Revenue',
-                   s.net_profit AS 'Net Profit', s.payment_method AS 'Payment Method',
-                   s.notes AS 'Comments / Notes'
-            FROM sales s 
-            JOIN products p ON s.product_id = p.id
-            ORDER BY s.sale_date DESC
-        """,
-            conn,
-        )
-
-        # Fetch Units Sold per Product
-        units_sold_df = pd.read_sql_query(
-            """
-            SELECT p.id AS 'ID', p.name AS 'Product Name', p.sku AS 'SKU',
-                   p.stock AS 'In Stock',
-                   COALESCE(SUM(s.quantity), 0) AS 'Total Units Sold'
-            FROM products p
-            LEFT JOIN sales s ON p.id = s.product_id
-            GROUP BY p.id
-            ORDER BY 'Total Units Sold' DESC
-        """,
-            conn,
-        )
-        conn.close()
+        # Units Sold Calculation
+        if not products_df.empty:
+            if not sales_raw_df.empty and "product_id" in sales_raw_df.columns:
+                units_sold = sales_raw_df.groupby("product_id")["quantity"].sum().reset_index()
+                units_sold_df = products_df.merge(units_sold, left_on="id", right_on="product_id", how="left").fillna(0)
+                units_sold_df["Total Units Sold"] = units_sold_df["quantity"].astype(int)
+            else:
+                units_sold_df = products_df.copy()
+                units_sold_df["Total Units Sold"] = 0
+            
+            units_display = units_sold_df[["id", "name", "sku", "stock", "Total Units Sold"]].rename(
+                columns={"id": "ID", "name": "Product Name", "sku": "SKU", "stock": "In Stock"}
+            )
+        else:
+            units_display = pd.DataFrame()
 
         m1, m2, m3, m4 = st.columns(4)
         total_products = len(products_df)
-        gross_rev = sales_df["Gross Rev"].sum() if not sales_df.empty else 0.0
-        net_profit = sales_df["Net Profit"].sum() if not sales_df.empty else 0.0
-        total_units_sold_all = units_sold_df["Total Units Sold"].sum() if not units_sold_df.empty else 0
+        gross_rev = sales_raw_df["gross_total"].sum() if not sales_raw_df.empty and "gross_total" in sales_raw_df.columns else 0.0
+        net_profit = sales_raw_df["net_profit"].sum() if not sales_raw_df.empty and "net_profit" in sales_raw_df.columns else 0.0
+        total_units_sold_all = units_display["Total Units Sold"].sum() if not units_display.empty else 0
 
         m1.metric("Total Products", total_products)
         m2.metric("Gross Revenue", f"${gross_rev:,.2f}")
@@ -182,21 +161,20 @@ elif st.session_state.get("authentication_status"):
         m4.metric("Total Units Sold", f"{total_units_sold_all:,} Units")
 
         st.markdown("---")
-
-        # UNITS SOLD SUMMARY TABLE
         st.subheader("📊 Product Sales Performance & Stock")
-        if not units_sold_df.empty:
-            st.dataframe(units_sold_df, use_container_width=True)
+        if not units_display.empty:
+            st.dataframe(units_display, use_container_width=True)
         else:
-            st.info("No products found.")
+            st.info("No products found in Google Sheets.")
 
         st.markdown("---")
-
         st.subheader("📥 Export Reports")
-        if not products_df.empty or not sales_df.empty:
-            excel_data = generate_excel_bytes(
-                {"Inventory": products_df, "Sales Ledger": sales_df, "Units Sold Summary": units_sold_df}
-            )
+        if not products_df.empty or not sales_raw_df.empty:
+            excel_data = generate_excel_bytes({
+                "Inventory": products_df, 
+                "Sales Ledger": sales_raw_df, 
+                "Units Sold Summary": units_display
+            })
             st.download_button(
                 label="📊 Download Complete NawatCore Excel Report (.xlsx)",
                 data=excel_data,
@@ -204,137 +182,110 @@ elif st.session_state.get("authentication_status"):
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 type="primary",
             )
-        else:
-            st.info("Add products or log sales to enable Master Excel download.")
 
     # -------------------------------------------------------------------
-    # TAB 2: MANAGE INVENTORY
+    # TAB 2: MANAGE INVENTORY & RESTOCK
     # -------------------------------------------------------------------
     with tabs[1]:
-        st.header("Add New Product to NawatCore Inventory")
+        st.header("Inventory Management")
+        inv_df = load_products_df()
+
+        # SECTION A: RESTOCK EXISTING ITEM
+        if not inv_df.empty:
+            st.subheader("🔄 Restock Existing Inventory Item")
+            with st.form("restock_product_form", clear_on_submit=True):
+                restock_options = {
+                    f"{row['name']} (Current Stock: {row['stock']} | SKU: {row['sku']})": row
+                    for _, row in inv_df.iterrows()
+                }
+                selected_restock_label = st.selectbox("Select Product to Restock", list(restock_options.keys()))
+                restock_item = restock_options[selected_restock_label]
+                
+                added_stock = st.number_input("Units Received / Added", min_value=1, step=1, value=10)
+                
+                restock_submit = st.form_submit_button("📥 Add Stock to Inventory", type="primary")
+                if restock_submit:
+                    payload = {
+                        "action": "restockProduct",
+                        "product_id": int(restock_item["id"]),
+                        "added_qty": int(added_stock)
+                    }
+                    success, message = send_to_google_sheet(payload)
+                    if success:
+                        st.success(f"Successfully added **+{added_stock} units** to **{restock_item['name']}**! New Stock: {int(restock_item['stock']) + added_stock}")
+                        st.rerun()
+                    else:
+                        st.error(f"Failed to update restock in Google Sheets: {message}")
+
+            st.markdown("---")
+
+        # SECTION B: ADD NEW PRODUCT
+        st.subheader("➕ Add Brand New Product to Inventory")
         with st.form("add_product_form", clear_on_submit=True):
             col_a, col_b = st.columns(2)
             p_name = col_a.text_input("Product Name")
             p_sku = col_b.text_input("SKU / Item Code")
-            p_landed_cost = col_a.number_input(
-                "Landed Cost w/ Packaging ($)",
-                min_value=0.0,
-                step=0.50,
-            )
-            p_default_price = col_b.number_input(
-                "Default Set Selling Price ($)", min_value=0.0, step=0.50
-            )
+            p_landed_cost = col_a.number_input("Landed Cost w/ Packaging ($)", min_value=0.0, step=0.50)
+            p_default_price = col_b.number_input("Default Set Selling Price ($)", min_value=0.0, step=0.50)
             p_stock = col_a.number_input("Initial Stock", min_value=0, step=1)
 
-            submit = st.form_submit_button("Add Product")
+            submit = st.form_submit_button("Add New Product")
             if submit:
                 if p_name.strip():
-                    try:
-                        conn = get_connection()
-                        c = conn.cursor()
-                        c.execute(
-                            "INSERT INTO products (name, sku, landed_cost, default_price, stock) VALUES (?, ?, ?, ?, ?)",
-                            (
-                                p_name,
-                                p_sku,
-                                p_landed_cost,
-                                p_default_price,
-                                p_stock,
-                            ),
-                        )
-                        conn.commit()
-                        conn.close()
-                        st.success(f"Added **{p_name}** to NawatCore inventory!")
-                        st.rerun()
-                    except sqlite3.IntegrityError:
-                        st.error("A product with this name already exists.")
+                    if p_name.strip() in inv_df["name"].astype(str).values:
+                        st.error("A product with this name already exists in Google Sheets.")
+                    else:
+                        next_id = int(inv_df["id"].max() + 1) if not inv_df.empty and "id" in inv_df.columns else 1
+                        payload = {
+                            "action": "addProduct",
+                            "row": [next_id, p_name.strip(), p_sku.strip(), p_landed_cost, p_default_price, p_stock]
+                        }
+                        success, message = send_to_google_sheet(payload)
+                        if success:
+                            st.success(f"Added **{p_name}** permanently to Google Sheets!")
+                            st.rerun()
+                        else:
+                            st.error(f"Failed to write to Google Sheets: {message}")
                 else:
                     st.warning("Please enter a valid product name.")
 
-        conn = get_connection()
-        inv_df = pd.read_sql_query("SELECT * FROM products", conn)
-        conn.close()
-
         if not inv_df.empty:
             st.markdown("---")
-            st.subheader("Current Stock & Pricing")
+            st.subheader("Current Stock & Pricing (Google Sheets)")
             st.dataframe(inv_df, use_container_width=True)
-
-            st.markdown("---")
-            st.subheader("📥 Export Inventory")
-            inv_excel = generate_excel_bytes({"Inventory": inv_df})
-            st.download_button(
-                label="📦 Download NawatCore Inventory Excel (.xlsx)",
-                data=inv_excel,
-                file_name=f"NawatCore_Inventory_{datetime.now().strftime('%Y%m%d')}.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            )
 
     # -------------------------------------------------------------------
     # TAB 3: LOG SALES
     # -------------------------------------------------------------------
     with tabs[2]:
         st.header("Record a NawatCore Transaction")
-        conn = get_connection()
-        products_df = pd.read_sql_query("SELECT * FROM products", conn)
-        conn.close()
+        products_df = load_products_df()
 
         if not products_df.empty:
             product_options = {
                 f"{row['name']} (Stock: {row['stock']} | Landed Cost: ${row['landed_cost']:.2f} | Set Price: ${row['default_price']:.2f})": row
                 for _, row in products_df.iterrows()
             }
-            selected_option = st.selectbox(
-                "Select Item", list(product_options.keys())
-            )
+            selected_option = st.selectbox("Select Item", list(product_options.keys()))
             item = product_options[selected_option]
 
             col1, col2 = st.columns(2)
 
             with col1:
-                sale_qty = st.number_input(
-                    "Quantity Sold",
-                    min_value=1,
-                    max_value=int(item["stock"]) if item["stock"] > 0 else 1,
-                    step=1,
-                )
-
-                actual_unit_price = st.number_input(
-                    "Actual Sale Price per Unit ($)",
-                    min_value=0.0,
-                    value=float(item["default_price"]),
-                    step=0.50,
-                )
-
-                sale_type = st.radio(
-                    "Sale Channel", ["Local", "Online"], horizontal=True
-                )
-
+                sale_qty = st.number_input("Quantity Sold", min_value=1, max_value=int(item["stock"]) if item["stock"] > 0 else 1, step=1)
+                actual_unit_price = st.number_input("Actual Sale Price per Unit ($)", min_value=0.0, value=float(item["default_price"]), step=0.50)
+                sale_type = st.radio("Sale Channel", ["Local", "Online"], horizontal=True)
                 shipping_cost = 0.0
                 if sale_type == "Online":
-                    shipping_cost = st.number_input(
-                        "Shipping Paid by You ($)",
-                        min_value=0.0,
-                        value=0.0,
-                        step=0.50,
-                    )
+                    shipping_cost = st.number_input("Shipping Paid by You ($)", min_value=0.0, value=0.0, step=0.50)
 
             with col2:
-                payment_method = st.selectbox(
-                    "Payment Method",
-                    ["Cash", "Zelle", "Venmo", "Apple Pay", "Cash App", "Other"],
-                )
-
+                payment_method = st.selectbox("Payment Method", ["Cash", "Zelle", "Venmo", "Apple Pay", "Cash App", "Other"])
                 transaction_date = st.date_input("Transaction Date", datetime.now())
                 transaction_time = st.time_input("Transaction Time", datetime.now().time())
-                sale_timestamp = datetime.combine(
-                    transaction_date, transaction_time
-                ).strftime("%Y-%m-%d %H:%M:%S")
+                sale_timestamp = datetime.combine(transaction_date, transaction_time).strftime("%Y-%m-%d %H:%M:%S")
 
-            sale_notes = st.text_input(
-                "Order Notes / Comments (Optional)",
-                placeholder="e.g., Customer: John Doe, Local pickup at 3 PM, 10% discount applied",
-            )
+            sale_notes = st.text_input("Order Notes / Comments (Optional)", placeholder="Customer name, pickup info, etc.")
 
             gross_total = sale_qty * actual_unit_price
             net_total = gross_total - shipping_cost
@@ -354,117 +305,84 @@ elif st.session_state.get("authentication_status"):
                 st.error("This item is currently out of stock.")
             else:
                 if st.button("Complete Sale", type="primary"):
-                    conn = get_connection()
-                    c = conn.cursor()
+                    sales_df_current = load_sales_df()
+                    next_sale_id = int(sales_df_current["id"].max() + 1) if not sales_df_current.empty and "id" in sales_df_current.columns else 1
 
-                    c.execute(
-                        "UPDATE products SET stock = stock - ? WHERE id = ?",
-                        (sale_qty, item["id"]),
-                    )
-
-                    c.execute(
-                        """
-                        INSERT INTO sales 
-                        (product_id, quantity, unit_sale_price, gross_total, sale_type, shipping_cost, net_total, landed_cost_total, net_profit, payment_method, sale_date, notes)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                        (
-                            item["id"],
-                            sale_qty,
-                            actual_unit_price,
-                            gross_total,
-                            sale_type,
-                            shipping_cost,
-                            net_total,
-                            total_landed_cost,
-                            net_profit,
-                            payment_method,
-                            sale_timestamp,
-                            sale_notes.strip(),
-                        ),
-                    )
-
-                    conn.commit()
-                    conn.close()
-
-                    st.success("Sale logged successfully!")
-                    st.rerun()
+                    payload = {
+                        "action": "addSale",
+                        "product_id": int(item["id"]),
+                        "qty": sale_qty,
+                        "row": [
+                            next_sale_id, int(item["id"]), sale_qty, actual_unit_price,
+                            gross_total, sale_type, shipping_cost, net_total,
+                            total_landed_cost, net_profit, payment_method,
+                            sale_timestamp, sale_notes.strip()
+                        ]
+                    }
+                    success, message = send_to_google_sheet(payload)
+                    if success:
+                        st.success("Sale logged permanently in Google Sheets!")
+                        st.rerun()
+                    else:
+                        st.error(f"Failed to write sale to Google Sheets: {message}")
         else:
             st.info("Add products to inventory before logging sales.")
 
     # -------------------------------------------------------------------
-    # TAB 4: SALES HISTORY, FILTERS, RETURNS & VOIDING SALES
+    # TAB 4: SALES HISTORY, FILTERS & EDIT TRANSACTIONS
     # -------------------------------------------------------------------
     with tabs[3]:
-        st.header("NawatCore Sales Ledger & Order Management")
-        conn = get_connection()
-        sales_raw = pd.read_sql_query(
-            """
-            SELECT s.id AS 'Sale ID', s.sale_date AS 'Date & Time', p.name AS 'Product', s.product_id,
-                   s.quantity AS 'Qty', s.unit_sale_price AS 'Sold Price/Unit', 
-                   s.gross_total AS 'Gross Rev', s.sale_type AS 'Type', 
-                   s.shipping_cost AS 'Shipping Cost', s.net_total AS 'Net Revenue',
-                   s.net_profit AS 'Net Profit', s.payment_method AS 'Payment Method',
-                   s.notes AS 'Comments / Notes'
-            FROM sales s 
-            JOIN products p ON s.product_id = p.id
-            ORDER BY s.sale_date DESC
-        """,
-            conn,
-        )
-        conn.close()
+        st.header("NawatCore Sales Ledger & Order Editing")
+        products_df = load_products_df()
+        sales_raw_df = load_sales_df()
 
-        if not sales_raw.empty:
-            # Convert Date & Time column to datetime for filtering
-            sales_raw['parsed_date'] = pd.to_datetime(sales_raw['Date & Time']).dt.date
+        if not sales_raw_df.empty and not products_df.empty and "product_id" in sales_raw_df.columns:
+            sales_merged = sales_raw_df.merge(
+                products_df[["id", "name", "landed_cost"]], left_on="product_id", right_on="id", suffixes=("", "_prod")
+            ).rename(columns={
+                "id": "Sale ID", "sale_date": "Date & Time", "name": "Product",
+                "quantity": "Qty", "unit_sale_price": "Sold Price/Unit",
+                "gross_total": "Gross Rev", "sale_type": "Type",
+                "shipping_cost": "Shipping Cost", "net_total": "Net Revenue",
+                "net_profit": "Net Profit", "payment_method": "Payment Method",
+                "notes": "Comments / Notes"
+            })
 
-            # --- FILTER SECTION ---
+            sales_merged['parsed_date'] = pd.to_datetime(sales_merged['Date & Time']).dt.date
+
             st.subheader("🔍 Filter Sales Ledger")
             col_f1, col_f2, col_f3, col_f4 = st.columns(4)
 
-            # 1. Date Range Filter
-            min_date = sales_raw['parsed_date'].min()
-            max_date = sales_raw['parsed_date'].max()
+            min_date = sales_merged['parsed_date'].min()
+            max_date = sales_merged['parsed_date'].max()
             with col_f1:
                 start_date = st.date_input("Start Date", min_date)
                 end_date = st.date_input("End Date", max_date)
 
-            # 2. Product Filter
-            all_products = ["All Products"] + sorted(list(sales_raw['Product'].unique()))
+            all_products = ["All Products"] + sorted(list(sales_merged['Product'].unique()))
             with col_f2:
                 selected_prod = st.selectbox("Product", all_products)
 
-            # 3. Sale Channel Filter
             with col_f3:
                 selected_channel = st.selectbox("Sale Channel", ["All Channels", "Local", "Online"])
 
-            # 4. Payment Method Filter
-            all_payments = ["All Payment Methods"] + sorted(list(sales_raw['Payment Method'].unique()))
+            all_payments = ["All Payment Methods"] + sorted(list(sales_merged['Payment Method'].unique()))
             with col_f4:
                 selected_payment = st.selectbox("Payment Method", all_payments)
 
-            # Apply Filters
-            filtered_df = sales_raw.copy()
-
-            # Date filter
+            filtered_df = sales_merged.copy()
             filtered_df = filtered_df[
                 (filtered_df['parsed_date'] >= start_date) & 
                 (filtered_df['parsed_date'] <= end_date)
             ]
 
-            # Product filter
             if selected_prod != "All Products":
                 filtered_df = filtered_df[filtered_df['Product'] == selected_prod]
-
-            # Channel filter
             if selected_channel != "All Channels":
                 filtered_df = filtered_df[filtered_df['Type'] == selected_channel]
-
-            # Payment filter
             if selected_payment != "All Payment Methods":
                 filtered_df = filtered_df[filtered_df['Payment Method'] == selected_payment]
 
-            # Show Filtered Summary Metrics
             f_rev = filtered_df['Gross Rev'].sum() if not filtered_df.empty else 0.0
             f_profit = filtered_df['Net Profit'].sum() if not filtered_df.empty else 0.0
             f_units = filtered_df['Qty'].sum() if not filtered_df.empty else 0
@@ -473,7 +391,6 @@ elif st.session_state.get("authentication_status"):
                 f"**Filter Summary:** Found **{len(filtered_df)}** transactions | **{f_units}** Units Sold | **${f_rev:,.2f}** Gross Rev | **${f_profit:,.2f}** Net Profit"
             )
 
-            # Display Table
             display_ledger = filtered_df.copy()
             display_ledger["Margin %"] = (
                 (display_ledger["Net Profit"] / display_ledger["Gross Rev"].replace(0, 1)) * 100
@@ -488,50 +405,69 @@ elif st.session_state.get("authentication_status"):
 
             st.markdown("---")
 
-            # VOID / RETURN SALE SECTION
-            st.subheader("🔄 Void Transaction / Process Return")
-            st.caption("Remove a sale entered by mistake or process a customer return.")
+            # EDIT TRANSACTION SECTION
+            st.subheader("✏️ Modify / Edit Existing Sale Record")
+            st.caption("Select a sale below to adjust pricing, quantities, notes, or payment methods.")
 
-            col_void1, col_void2 = st.columns(2)
-            with col_void1:
-                sale_list = {
-                    f"ID #{row['Sale ID']} - {row['Product']} (Qty: {row['Qty']} | ${row['Gross Rev']:.2f} on {row['Date & Time']})": row
-                    for _, row in sales_raw.iterrows()
-                }
-                selected_sale_label = st.selectbox("Select Sale to Cancel / Void", list(sale_list.keys()))
-                selected_sale = sale_list[selected_sale_label]
+            sale_list = {
+                f"ID #{row['Sale ID']} - {row['Product']} (Qty: {row['Qty']} | ${row['Gross Rev']:.2f} on {row['Date & Time']})": row
+                for _, row in sales_merged.iterrows()
+            }
+            selected_sale_label = st.selectbox("Select Sale Record to Modify", list(sale_list.keys()))
+            s_edit = sale_list[selected_sale_label]
 
-            with col_void2:
-                return_to_stock = st.radio(
-                    "Action Type:",
-                    ["Return item(s) to inventory (Customer Return / Accidental Entry)", "Do NOT return to inventory (Damaged Goods / Loss / Write-off)"]
-                )
+            with st.form("edit_sale_form"):
+                ec1, ec2 = st.columns(2)
 
-                if st.button("❌ Cancel / Void This Sale", type="primary"):
-                    conn = get_connection()
-                    c = conn.cursor()
+                with ec1:
+                    e_qty = ec1.number_input("Quantity Sold", min_value=1, value=int(s_edit["Qty"]), step=1)
+                    e_unit_price = ec1.number_input("Sale Price per Unit ($)", min_value=0.0, value=float(s_edit["Sold Price/Unit"]), step=0.50)
+                    e_type = ec1.radio("Sale Channel", ["Local", "Online"], index=0 if s_edit["Type"] == "Local" else 1, horizontal=True)
+                    
+                    e_shipping = 0.0
+                    if e_type == "Online":
+                        e_shipping = ec1.number_input("Shipping Paid by You ($)", min_value=0.0, value=float(s_edit["Shipping Cost"]), step=0.50)
 
-                    if "Return item(s) to inventory" in return_to_stock:
-                        c.execute(
-                            "UPDATE products SET stock = stock + ? WHERE id = ?",
-                            (selected_sale["Qty"], selected_sale["product_id"])
-                        )
+                with ec2:
+                    pay_options = ["Cash", "Zelle", "Venmo", "Apple Pay", "Cash App", "Other"]
+                    default_pay_idx = pay_options.index(s_edit["Payment Method"]) if s_edit["Payment Method"] in pay_options else 0
+                    e_payment = ec2.selectbox("Payment Method", pay_options, index=default_pay_idx)
+                    
+                    parsed_dt = pd.to_datetime(s_edit["Date & Time"])
+                    e_date = ec2.date_input("Transaction Date", parsed_dt.date())
+                    e_time = ec2.time_input("Transaction Time", parsed_dt.time())
+                    e_timestamp = datetime.combine(e_date, e_time).strftime("%Y-%m-%d %H:%M:%S")
 
-                    c.execute("DELETE FROM sales WHERE id = ?", (selected_sale["Sale ID"],))
-                    conn.commit()
-                    conn.close()
+                e_notes = st.text_input("Comments / Notes", value=str(s_edit["Comments / Notes"]))
 
-                    st.success(f"Successfully voided Sale #{selected_sale['Sale ID']}!")
-                    st.rerun()
+                # Calculate updated totals
+                e_gross = e_qty * e_unit_price
+                e_net = e_gross - e_shipping
+                e_landed_total = e_qty * float(s_edit["landed_cost"])
+                e_profit = e_net - e_landed_total
+                
+                # Difference in quantity to adjust inventory stock
+                qty_difference = e_qty - int(s_edit["Qty"])
 
-            st.markdown("---")
-            st.subheader("📥 Export Filtered Sales Ledger")
-            sales_excel = generate_excel_bytes({"Filtered Sales": display_ledger[cols_to_show]})
-            st.download_button(
-                label="🛒 Download Filtered Sales Excel (.xlsx)",
-                data=sales_excel,
-                file_name=f"NawatCore_Filtered_Sales_{datetime.now().strftime('%Y%m%d')}.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            )
+                btn_edit = st.form_submit_button("💾 Save Updated Sale Record", type="primary")
+                if btn_edit:
+                    payload = {
+                        "action": "editSale",
+                        "sale_id": int(s_edit["Sale ID"]),
+                        "product_id": int(s_edit["product_id"]),
+                        "qty_diff": qty_difference,
+                        "row": [
+                            int(s_edit["Sale ID"]), int(s_edit["product_id"]), e_qty, e_unit_price,
+                            e_gross, e_type, e_shipping, e_net,
+                            e_landed_total, e_profit, e_payment,
+                            e_timestamp, e_notes.strip()
+                        ]
+                    }
+                    success, message = send_to_google_sheet(payload)
+                    if success:
+                        st.success(f"Sale ID #{s_edit['Sale ID']} updated successfully in Google Sheets!")
+                        st.rerun()
+                    else:
+                        st.error(f"Failed to update sale record: {message}")
         else:
             st.info("No sales recorded yet.")
