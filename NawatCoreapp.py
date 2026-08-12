@@ -371,8 +371,13 @@ elif st.session_state.get("authentication_status"):
         sales_raw_df = load_sales_df()
 
         if not sales_raw_df.empty and not products_df.empty and "product_id" in sales_raw_df.columns:
+            # Ensure integer matching before merge
+            sales_raw_df["product_id"] = pd.to_numeric(sales_raw_df["product_id"], errors='coerce').fillna(0).astype(int)
+            products_df["id"] = pd.to_numeric(products_df["id"], errors='coerce').fillna(0).astype(int)
+
+            # Left join ensures NO sale records are ever dropped if product lookup differs
             sales_merged = sales_raw_df.merge(
-                products_df[["id", "name", "landed_cost"]], left_on="product_id", right_on="id", suffixes=("", "_prod")
+                products_df[["id", "name", "landed_cost"]], left_on="product_id", right_on="id", how="left", suffixes=("", "_prod")
             ).rename(columns={
                 "id": "Sale ID", "sale_date": "Date & Time", "name": "Product",
                 "quantity": "Qty", "unit_sale_price": "Sold Price/Unit",
@@ -381,8 +386,9 @@ elif st.session_state.get("authentication_status"):
                 "net_profit": "Net Profit", "payment_method": "Payment Method",
                 "notes": "Comments / Notes"
             })
+            sales_merged["Product"] = sales_merged["Product"].fillna("Unknown Product")
 
-            # SAFE DATETIME PARSING WITH FALLBACK
+            # Safe datetime parsing with fallback
             sales_merged['parsed_dt'] = pd.to_datetime(sales_merged['Date & Time'], errors='coerce')
             sales_merged['parsed_date'] = sales_merged['parsed_dt'].dt.date
 
@@ -413,8 +419,8 @@ elif st.session_state.get("authentication_status"):
             # Apply date filters safely
             if not filtered_df['parsed_date'].isna().all():
                 filtered_df = filtered_df[
-                    (filtered_df['parsed_date'] >= start_date) & 
-                    (filtered_df['parsed_date'] <= end_date)
+                    (filtered_df['parsed_date'].isna()) | 
+                    ((filtered_df['parsed_date'] >= start_date) & (filtered_df['parsed_date'] <= end_date))
                 ]
 
             if selected_prod != "All Products":
@@ -487,21 +493,26 @@ elif st.session_state.get("authentication_status"):
 
                 e_gross = e_qty * e_unit_price
                 e_net = e_gross - e_shipping
-                e_landed_total = e_qty * float(s_edit["landed_cost"])
+                e_landed_total = e_qty * float(s_edit["landed_cost"]) if pd.notna(s_edit["landed_cost"]) else 0.0
                 e_profit = e_net - e_landed_total
                 qty_difference = e_qty - int(s_edit["Qty"])
 
                 btn_edit = st.form_submit_button("💾 Save Updated Sale Record", type="primary")
                 if btn_edit:
-                    # Update memory instantly
+                    # Update memory cleanly
                     s_idx = st.session_state["sales_df"].index[st.session_state["sales_df"]["id"] == int(s_edit["Sale ID"])].tolist()
                     if s_idx:
                         st.session_state["sales_df"].loc[s_idx[0]] = [
-                            int(s_edit["Sale ID"]), int(s_edit["product_id"]), e_qty, e_unit_price,
-                            e_gross, e_type, e_shipping, e_net,
-                            e_landed_total, e_profit, e_payment,
-                            e_timestamp, e_notes.strip()
+                            int(s_edit["Sale ID"]), int(s_edit["product_id"]), int(e_qty), float(e_unit_price),
+                            float(e_gross), str(e_type), float(e_shipping), float(e_net),
+                            float(e_landed_total), float(e_profit), str(e_payment),
+                            str(e_timestamp), str(e_notes).strip()
                         ]
+                        # Re-enforce explicit data types
+                        st.session_state["sales_df"]["id"] = pd.to_numeric(st.session_state["sales_df"]["id"], errors='coerce').fillna(0).astype(int)
+                        st.session_state["sales_df"]["product_id"] = pd.to_numeric(st.session_state["sales_df"]["product_id"], errors='coerce').fillna(0).astype(int)
+                        st.session_state["sales_df"]["quantity"] = pd.to_numeric(st.session_state["sales_df"]["quantity"], errors='coerce').fillna(0).astype(int)
+
                     if qty_difference != 0:
                         p_idx = st.session_state["products_df"].index[st.session_state["products_df"]["id"] == int(s_edit["product_id"])].tolist()
                         if p_idx:
