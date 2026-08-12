@@ -231,22 +231,19 @@ elif st.session_state.get("authentication_status"):
                 ep_name = ec1.text_input("Product Name", value=str(p_edit["name"]))
                 ep_sku = ec2.text_input("SKU / Item Code", value=str(p_edit["sku"]))
 
-                # Category selection or custom typing
                 current_cat = str(p_edit["category"])
                 cat_idx = existing_cats.index(current_cat) if current_cat in existing_cats else 0
-                ep_cat_select = ec1.selectbox("Category", existing_cats + ["+ Add Custom Category..."], index=cat_idx)
-                if ep_cat_select == "+ Add Custom Category...":
-                    ep_cat = ec1.text_input("Enter New Category Name", value="")
-                else:
-                    ep_cat = ep_cat_select
+                
+                ep_cat_select = ec1.selectbox("Category (Select Existing)", existing_cats, index=cat_idx)
+                ep_custom_cat = ec2.text_input("Or Type New Category (Optional)", value="", placeholder="e.g. Dosing Cups & Funnels")
 
-                ep_landed_cost = ec2.number_input("Landed Cost w/ Packaging ($)", min_value=0.0, value=float(p_edit["landed_cost"]), step=0.50)
-                ep_default_price = ec1.number_input("Default Set Selling Price ($)", min_value=0.0, value=float(p_edit["default_price"]), step=0.50)
-                ep_stock = ec2.number_input("Current Stock Count", min_value=0, value=int(p_edit["stock"]), step=1)
+                ep_landed_cost = ec1.number_input("Landed Cost w/ Packaging ($)", min_value=0.0, value=float(p_edit["landed_cost"]), step=0.50)
+                ep_default_price = ec2.number_input("Default Set Selling Price ($)", min_value=0.0, value=float(p_edit["default_price"]), step=0.50)
+                ep_stock = ec1.number_input("Current Stock Count", min_value=-9999, value=int(p_edit["stock"]), step=1)
 
                 btn_save_prod = st.form_submit_button("💾 Save Product Details", type="primary")
                 if btn_save_prod:
-                    final_cat = ep_cat.strip() if ep_cat.strip() else "General Accessories"
+                    final_cat = ep_custom_cat.strip() if ep_custom_cat.strip() else ep_cat_select
                     
                     # Update memory instantly
                     idx = st.session_state["products_df"].index[st.session_state["products_df"]["id"] == int(p_edit["id"])].tolist()
@@ -306,15 +303,12 @@ elif st.session_state.get("authentication_status"):
             p_name = col_a.text_input("Product Name")
             p_sku = col_b.text_input("SKU / Item Code")
 
-            p_cat_select = col_a.selectbox("Category", existing_cats + ["+ Add Custom Category..."])
-            if p_cat_select == "+ Add Custom Category...":
-                p_cat = col_a.text_input("Enter Custom Category Name")
-            else:
-                p_cat = p_cat_select
+            p_cat_select = col_a.selectbox("Category (Select Existing)", existing_cats)
+            p_custom_cat = col_b.text_input("Or Type New Category (Optional)", placeholder="e.g. Dosing Cups & Funnels")
 
-            p_landed_cost = col_b.number_input("Landed Cost w/ Packaging ($)", min_value=0.0, step=0.50)
-            p_default_price = col_a.number_input("Default Set Selling Price ($)", min_value=0.0, step=0.50)
-            p_stock = col_b.number_input("Initial Stock", min_value=0, step=1)
+            p_landed_cost = col_a.number_input("Landed Cost w/ Packaging ($)", min_value=0.0, step=0.50)
+            p_default_price = col_b.number_input("Default Set Selling Price ($)", min_value=0.0, step=0.50)
+            p_stock = col_a.number_input("Initial Stock", min_value=0, step=1)
 
             submit = st.form_submit_button("Add New Product")
             if submit:
@@ -322,7 +316,7 @@ elif st.session_state.get("authentication_status"):
                     if p_name.strip() in inv_df["name"].astype(str).values:
                         st.error("A product with this name already exists in Google Sheets.")
                     else:
-                        final_add_cat = p_cat.strip() if p_cat.strip() else "General Accessories"
+                        final_add_cat = p_custom_cat.strip() if p_custom_cat.strip() else p_cat_select
                         next_id = int(inv_df["id"].max() + 1) if not inv_df.empty and "id" in inv_df.columns else 1
                         new_row = {
                             "id": next_id, "name": p_name.strip(), "sku": p_sku.strip(),
@@ -420,13 +414,11 @@ elif st.session_state.get("authentication_status"):
                             "payment_method": payment_method, "sale_date": sale_timestamp, "notes": sale_notes.strip()
                         }
 
-                        # Update memory instantly
                         st.session_state["sales_df"] = pd.concat([st.session_state["sales_df"], pd.DataFrame([new_sale_row])], ignore_index=True)
                         p_idx = st.session_state["products_df"].index[st.session_state["products_df"]["id"] == int(item["id"])].tolist()
                         if p_idx:
                             st.session_state["products_df"].at[p_idx[0], "stock"] -= sale_qty
 
-                        # Sync to Google Sheets
                         payload = {
                             "action": "addSale",
                             "product_id": int(item["id"]),
