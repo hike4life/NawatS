@@ -159,15 +159,29 @@ elif st.session_state.get("authentication_status"):
 
         if not products_df.empty:
             if not sales_raw_df.empty and "product_id" in sales_raw_df.columns:
-                units_sold = sales_raw_df.groupby("product_id")["quantity"].sum().reset_index()
-                units_sold_df = products_df.merge(units_sold, left_on="id", right_on="product_id", how="left").fillna(0)
-                units_sold_df["Total Units Sold"] = units_sold_df["quantity"].astype(int)
+                # Group sales to get total units sold and total net profit per product
+                prod_stats = sales_raw_df.groupby("product_id").agg(
+                    Total_Units_Sold=("quantity", "sum"),
+                    Total_Net_Profit=("net_profit", "sum")
+                ).reset_index()
+
+                units_sold_df = products_df.merge(prod_stats, left_on="id", right_on="product_id", how="left").fillna(0)
+                units_sold_df["Total Units Sold"] = units_sold_df["Total_Units_Sold"].astype(int)
+                units_sold_df["Total Net Profit"] = units_sold_df["Total_Net_Profit"].apply(lambda x: f"${x:,.2f}")
             else:
                 units_sold_df = products_df.copy()
                 units_sold_df["Total Units Sold"] = 0
+                units_sold_df["Total Net Profit"] = "$0.00"
             
-            units_display = units_sold_df[["id", "name", "sku", "category", "stock", "Total Units Sold"]].rename(
-                columns={"id": "ID", "name": "Product Name", "sku": "SKU", "category": "Category", "stock": "In Stock"}
+            units_display = units_sold_df[["id", "name", "sku", "category", "stock", "Total Units Sold", "Total Net Profit"]].rename(
+                columns={
+                    "id": "ID", 
+                    "name": "Product Name", 
+                    "sku": "SKU", 
+                    "category": "Category", 
+                    "stock": "In Stock",
+                    "Total Net Profit": "Total Net Profit ($)"
+                }
             )
         else:
             units_display = pd.DataFrame()
