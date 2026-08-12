@@ -429,12 +429,17 @@ elif st.session_state.get("authentication_status"):
         products_df = load_products_df()
 
         if not sales_raw_df.empty and not products_df.empty:
+            # Merge with explicit suffixes so sale 'id' remains 'id'
             sales_merged = sales_raw_df.merge(
-                products_df[["id", "name", "category"]], left_on="product_id", right_on="id", how="left"
+                products_df[["id", "name", "category"]], 
+                left_on="product_id", 
+                right_on="id", 
+                how="left", 
+                suffixes=("", "_prod")
             ).rename(columns={"name": "Product Name", "category": "Category"})
             
             sales_merged["Product Display"] = sales_merged["Product Name"].apply(
-                lambda name: f"{get_product_theme(name)[0]} {name}"
+                lambda name: f"{get_product_theme(name)[0]} {name}" if pd.notna(name) else "📦 General Product"
             )
 
             st.subheader("🔍 Filter Sales Ledger")
@@ -486,8 +491,12 @@ elif st.session_state.get("authentication_status"):
                 "unit_sale_price", "gross_total", "landed_cost_total", 
                 "net_profit", "payment_method", "sale_type", "notes"
             ]
+            
+            # Safe selection of available columns
+            valid_cols = [c for c in display_cols if c in filtered_ledger.columns]
+
             st.dataframe(
-                filtered_ledger[display_cols].rename(columns={
+                filtered_ledger[valid_cols].rename(columns={
                     "id": "Sale ID", "sale_date": "Date", "quantity": "Qty",
                     "unit_sale_price": "Price/Unit", "gross_total": "Gross Rev",
                     "landed_cost_total": "Landed Cost", "net_profit": "Net Profit",
