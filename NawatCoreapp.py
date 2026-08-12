@@ -85,7 +85,6 @@ def import_excel_to_sqlite(file):
     conn = get_db_connection()
     cursor = conn.cursor()
     
-    # Import Inventory Sheet
     for sheet in xls.sheet_names:
         if sheet.lower() == "inventory":
             df_inv = pd.read_excel(file, sheet_name=sheet)
@@ -215,7 +214,7 @@ elif st.session_state.get("authentication_status"):
         "📊 Dashboard",
         "➕ Manage Inventory & Edit Items",
         "🛒 Log Sales",
-        "📜 Sales History & Edit Transactions",
+        "📜 Sales History & Filter Ledger",
     ])
 
     # -------------------------------------------------------------------
@@ -270,43 +269,56 @@ elif st.session_state.get("authentication_status"):
             st.info("No products in database.")
 
     # -------------------------------------------------------------------
-    # TAB 2: MANAGE INVENTORY, EDIT & RESTOCK
+    # TAB 2: MANAGE INVENTORY, CATEGORY FILTER & EDIT ITEMS
     # -------------------------------------------------------------------
     with tabs[1]:
         st.header("Inventory Management")
         inv_df = load_products_df()
 
         if not inv_df.empty:
-            st.subheader("✏️ Edit Product Details")
-            edit_item_options = {
-                f"{get_product_theme(row['name'])[0]} {row['name']} (Stock: {row['stock']} | Price: ${row['default_price']:.2f})": row
-                for _, row in inv_df.iterrows()
-            }
-            selected_edit_label = st.selectbox("Select Item to Update", list(edit_item_options.keys()))
-            p_edit = edit_item_options[selected_edit_label]
+            st.subheader("🔍 Filter Inventory by Category")
+            avail_inv_cats = ["All Categories"] + sorted(list(inv_df["category"].dropna().unique()))
+            selected_inv_cat = st.selectbox("Select Category to Filter Products", avail_inv_cats)
 
-            render_product_card(p_edit, subtitle="Selected Item for Edit")
+            if selected_inv_cat != "All Categories":
+                filtered_inv_df = inv_df[inv_df["category"] == selected_inv_cat]
+            else:
+                filtered_inv_df = inv_df
 
-            with st.form("edit_product_form"):
-                ec1, ec2 = st.columns(2)
-                ep_name = ec1.text_input("Product Name", value=str(p_edit["name"]))
-                ep_sku = ec2.text_input("SKU / Item Code", value=str(p_edit["sku"]))
-                ep_category = ec1.text_input("Category", value=str(p_edit["category"]))
-                ep_landed_cost = ec2.number_input("Landed Cost ($)", min_value=0.0, value=float(p_edit["landed_cost"]), step=0.50)
-                ep_default_price = ec1.number_input("Selling Price ($)", min_value=0.0, value=float(p_edit["default_price"]), step=0.50)
-                ep_stock = ec2.number_input("Stock Count", min_value=-9999, value=int(p_edit["stock"]), step=1)
+            st.markdown("---")
+            st.subheader("✏️ Edit Product Details & Stock Count")
+            if not filtered_inv_df.empty:
+                edit_item_options = {
+                    f"{get_product_theme(row['name'])[0]} [{row['category']}] {row['name']} (Stock: {row['stock']} | Price: ${row['default_price']:.2f})": row
+                    for _, row in filtered_inv_df.iterrows()
+                }
+                selected_edit_label = st.selectbox("Select Item to Update", list(edit_item_options.keys()))
+                p_edit = edit_item_options[selected_edit_label]
 
-                btn_save_prod = st.form_submit_button("💾 Save Product Details", type="primary")
-                if btn_save_prod:
-                    conn = get_db_connection()
-                    cursor = conn.cursor()
-                    cursor.execute("""
-                        UPDATE inventory SET name=?, sku=?, category=?, landed_cost=?, default_price=?, stock=? WHERE id=?
-                    """, (ep_name.strip(), ep_sku.strip(), ep_category.strip(), ep_landed_cost, ep_default_price, ep_stock, int(p_edit["id"])))
-                    conn.commit()
-                    conn.close()
-                    st.toast(f"Saved {ep_name}!", icon="✏️")
-                    st.rerun()
+                render_product_card(p_edit, subtitle="Selected Item for Edit")
+
+                with st.form("edit_product_form"):
+                    ec1, ec2 = st.columns(2)
+                    ep_name = ec1.text_input("Product Name", value=str(p_edit["name"]))
+                    ep_sku = ec2.text_input("SKU / Item Code", value=str(p_edit["sku"]))
+                    ep_category = ec1.text_input("Category", value=str(p_edit["category"]))
+                    ep_landed_cost = ec2.number_input("Landed Cost ($)", min_value=0.0, value=float(p_edit["landed_cost"]), step=0.50)
+                    ep_default_price = ec1.number_input("Selling Price ($)", min_value=0.0, value=float(p_edit["default_price"]), step=0.50)
+                    ep_stock = ec2.number_input("Stock Count", min_value=-9999, value=int(p_edit["stock"]), step=1)
+
+                    btn_save_prod = st.form_submit_button("💾 Save Product Details", type="primary")
+                    if btn_save_prod:
+                        conn = get_db_connection()
+                        cursor = conn.cursor()
+                        cursor.execute("""
+                            UPDATE inventory SET name=?, sku=?, category=?, landed_cost=?, default_price=?, stock=? WHERE id=?
+                        """, (ep_name.strip(), ep_sku.strip(), ep_category.strip(), ep_landed_cost, ep_default_price, ep_stock, int(p_edit["id"])))
+                        conn.commit()
+                        conn.close()
+                        st.toast(f"Saved {ep_name}!", icon="✏️")
+                        st.rerun()
+            else:
+                st.warning("No products found in this category.")
 
         st.markdown("---")
         st.subheader("➕ Add Brand New Product")
@@ -334,71 +346,154 @@ elif st.session_state.get("authentication_status"):
                 except Exception as e:
                     st.error(f"Error adding product: {e}")
 
+        if not inv_df.empty:
+            st.markdown("---")
+            st.subheader("📋 Current Stock Overview")
+            display_inv_table = filtered_inv_df.copy()
+            display_inv_table["Product Name"] = display_inv_table["name"].apply(
+                lambda name: f"{get_product_theme(name)[0]} {name}"
+            )
+            st.dataframe(
+                display_inv_table[["id", "Product Name", "sku", "category", "landed_cost", "default_price", "stock"]].rename(columns={
+                    "id": "ID", "sku": "SKU", "category": "Category", "landed_cost": "Landed Cost ($)",
+                    "default_price": "Selling Price ($)", "stock": "Current Stock"
+                }),
+                width="stretch"
+            )
+
     # -------------------------------------------------------------------
-    # TAB 3: LOG SALES
+    # TAB 3: LOG SALES (WITH CATEGORY FILTER)
     # -------------------------------------------------------------------
     with tabs[2]:
         st.header("Record a NawatCore Transaction")
         products_df = load_products_df()
 
         if not products_df.empty:
-            product_options = {
-                f"{get_product_theme(row['name'])[0]} [{row['category']}] {row['name']} (Stock: {row['stock']} | ${row['default_price']:.2f})": row
-                for _, row in products_df.iterrows()
-            }
-            selected_option = st.selectbox("Select Item to Sell", list(product_options.keys()))
-            item = product_options[selected_option]
+            st.subheader("🔍 Narrow Search by Category")
+            avail_cats = ["All Categories"] + sorted(list(products_df["category"].dropna().unique()))
+            selected_sale_cat = st.selectbox("Filter Product List by Category", avail_cats)
 
-            render_product_card(item, subtitle="Selected Sale Details")
+            if selected_sale_cat != "All Categories":
+                filtered_sale_prods = products_df[products_df["category"] == selected_sale_cat]
+            else:
+                filtered_sale_prods = products_df
 
-            col1, col2 = st.columns(2)
-            sale_qty = col1.number_input("Quantity Sold", min_value=1, max_value=int(item["stock"]) if item["stock"] > 0 else 1, step=1)
-            actual_unit_price = col1.number_input("Sale Price per Unit ($)", min_value=0.0, value=float(item["default_price"]), step=0.50)
-            sale_type = col1.radio("Sale Channel", ["Local", "Online"], horizontal=True)
-            shipping_cost = col1.number_input("Shipping Paid ($)", min_value=0.0, value=0.0, step=0.50) if sale_type == "Online" else 0.0
+            if not filtered_sale_prods.empty:
+                product_options = {
+                    f"{get_product_theme(row['name'])[0]} [{row['category']}] {row['name']} (Stock: {row['stock']} | ${row['default_price']:.2f})": row
+                    for _, row in filtered_sale_prods.iterrows()
+                }
+                selected_option = st.selectbox("Select Item to Sell", list(product_options.keys()))
+                item = product_options[selected_option]
 
-            payment_method = col2.selectbox("Payment Method", ["Cash", "Zelle", "Venmo", "Apple Pay", "Cash App", "Other"])
-            transaction_date = col2.date_input("Transaction Date", datetime.now())
-            sale_timestamp = transaction_date.strftime("%Y-%m-%d %H:%M:%S")
+                render_product_card(item, subtitle="Selected Sale Details")
 
-            sale_notes = st.text_input("Order Notes (Optional)", placeholder="Customer name, pickup info, etc.")
+                col1, col2 = st.columns(2)
+                sale_qty = col1.number_input("Quantity Sold", min_value=1, max_value=int(item["stock"]) if item["stock"] > 0 else 1, step=1)
+                actual_unit_price = col1.number_input("Sale Price per Unit ($)", min_value=0.0, value=float(item["default_price"]), step=0.50)
+                sale_type = col1.radio("Sale Channel", ["Local", "Online"], horizontal=True)
+                shipping_cost = col1.number_input("Shipping Paid ($)", min_value=0.0, value=0.0, step=0.50) if sale_type == "Online" else 0.0
 
-            gross_total = sale_qty * actual_unit_price
-            net_total = gross_total - shipping_cost
-            total_landed_cost = sale_qty * float(item["landed_cost"])
-            net_profit = net_total - total_landed_cost
+                payment_method = col2.selectbox("Payment Method", ["Cash", "Venmo", "Zelle", "Apple Pay", "Cash App", "Ebay", "MP", "Other"])
+                transaction_date = col2.date_input("Transaction Date", datetime.now())
+                sale_timestamp = transaction_date.strftime("%Y-%m-%d %H:%M:%S")
 
-            if st.button("Complete Sale", type="primary"):
-                conn = get_db_connection()
-                cursor = conn.cursor()
-                cursor.execute("""
-                    INSERT INTO sales (product_id, quantity, unit_sale_price, gross_total, sale_type, shipping_cost, net_total, landed_cost_total, net_profit, payment_method, sale_date, notes)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """, (int(item["id"]), sale_qty, actual_unit_price, gross_total, sale_type, shipping_cost, net_total, total_landed_cost, net_profit, payment_method, sale_timestamp, sale_notes.strip()))
-                
-                cursor.execute("UPDATE inventory SET stock = stock - ? WHERE id = ?", (sale_qty, int(item["id"])))
-                conn.commit()
-                conn.close()
+                sale_notes = st.text_input("Order Notes (Optional)", placeholder="Customer name, pickup info, etc.")
 
-                st.toast("Sale logged permanently!", icon="🛒")
-                st.rerun()
+                gross_total = sale_qty * actual_unit_price
+                net_total = gross_total - shipping_cost
+                total_landed_cost = sale_qty * float(item["landed_cost"])
+                net_profit = net_total - total_landed_cost
+
+                if st.button("Complete Sale", type="primary"):
+                    conn = get_db_connection()
+                    cursor = conn.cursor()
+                    cursor.execute("""
+                        INSERT INTO sales (product_id, quantity, unit_sale_price, gross_total, sale_type, shipping_cost, net_total, landed_cost_total, net_profit, payment_method, sale_date, notes)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """, (int(item["id"]), sale_qty, actual_unit_price, gross_total, sale_type, shipping_cost, net_total, total_landed_cost, net_profit, payment_method, sale_timestamp, sale_notes.strip()))
+                    
+                    cursor.execute("UPDATE inventory SET stock = stock - ? WHERE id = ?", (sale_qty, int(item["id"])))
+                    conn.commit()
+                    conn.close()
+
+                    st.toast("Sale logged permanently!", icon="🛒")
+                    st.rerun()
 
     # -------------------------------------------------------------------
-    # TAB 4: SALES HISTORY LEDGER
+    # TAB 4: SALES HISTORY & CATEGORY FILTER LEDGER
     # -------------------------------------------------------------------
     with tabs[3]:
-        st.header("NawatCore Sales Ledger")
+        st.header("NawatCore Sales Ledger & Category Filters")
         sales_raw_df = load_sales_df()
         products_df = load_products_df()
 
         if not sales_raw_df.empty and not products_df.empty:
             sales_merged = sales_raw_df.merge(
-                products_df[["id", "name"]], left_on="product_id", right_on="id", how="left"
-            ).rename(columns={"name": "Product Name"})
+                products_df[["id", "name", "category"]], left_on="product_id", right_on="id", how="left"
+            ).rename(columns={"name": "Product Name", "category": "Category"})
             
-            sales_merged["Product Name"] = sales_merged["Product Name"].apply(
+            sales_merged["Product Display"] = sales_merged["Product Name"].apply(
                 lambda name: f"{get_product_theme(name)[0]} {name}"
             )
-            st.dataframe(sales_merged, width="stretch")
+
+            st.subheader("🔍 Filter Sales Ledger")
+            fc1, fc2, fc3, fc4 = st.columns(4)
+
+            # Category Filter Dropdown
+            all_cats = ["All Categories"] + sorted(list(sales_merged["Category"].dropna().unique()))
+            selected_cat = fc1.selectbox("Filter by Category", all_cats)
+
+            # Product Filter Dropdown
+            if selected_cat != "All Categories":
+                cat_filtered_sales = sales_merged[sales_merged["Category"] == selected_cat]
+            else:
+                cat_filtered_sales = sales_merged
+
+            all_prods = ["All Products"] + sorted(list(cat_filtered_sales["Product Display"].dropna().unique()))
+            selected_prod = fc2.selectbox("Filter by Product", all_prods)
+
+            # Payment Method Filter
+            all_pay = ["All Payment Methods"] + sorted(list(sales_merged["payment_method"].dropna().unique()))
+            selected_pay = fc3.selectbox("Filter by Payment Method", all_pay)
+
+            # Sale Channel Filter
+            selected_channel = fc4.selectbox("Filter by Channel", ["All Channels", "Local", "Online"])
+
+            # Apply All Active Filters
+            filtered_ledger = sales_merged.copy()
+
+            if selected_cat != "All Categories":
+                filtered_ledger = filtered_ledger[filtered_ledger["Category"] == selected_cat]
+            if selected_prod != "All Products":
+                filtered_ledger = filtered_ledger[filtered_ledger["Product Display"] == selected_prod]
+            if selected_pay != "All Payment Methods":
+                filtered_ledger = filtered_ledger[filtered_ledger["payment_method"] == selected_pay]
+            if selected_channel != "All Channels":
+                filtered_ledger = filtered_ledger[filtered_ledger["sale_type"] == selected_channel]
+
+            # Metric Bar for Filtered Results
+            f_rev = filtered_ledger["gross_total"].sum() if not filtered_ledger.empty else 0.0
+            f_profit = filtered_ledger["net_profit"].sum() if not filtered_ledger.empty else 0.0
+            f_units = filtered_ledger["quantity"].sum() if not filtered_ledger.empty else 0
+
+            st.info(
+                f"Showing **{len(filtered_ledger)}** matching sales | **{f_units}** Units Sold | **${f_rev:,.2f}** Revenue | **${f_profit:,.2f}** Profit"
+            )
+
+            display_cols = [
+                "id", "sale_date", "Category", "Product Display", "quantity", 
+                "unit_sale_price", "gross_total", "landed_cost_total", 
+                "net_profit", "payment_method", "sale_type", "notes"
+            ]
+            st.dataframe(
+                filtered_ledger[display_cols].rename(columns={
+                    "id": "Sale ID", "sale_date": "Date", "quantity": "Qty",
+                    "unit_sale_price": "Price/Unit", "gross_total": "Gross Rev",
+                    "landed_cost_total": "Landed Cost", "net_profit": "Net Profit",
+                    "payment_method": "Payment", "sale_type": "Channel", "notes": "Notes"
+                }),
+                width="stretch"
+            )
         else:
             st.info("No sales recorded yet.")
