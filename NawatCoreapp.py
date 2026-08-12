@@ -79,6 +79,28 @@ def load_sales_df():
         ])
     return df
 
+def import_excel_to_sqlite(file):
+    """Imports Excel sheets (Inventory & Sales) directly into SQLite database."""
+    xls = pd.ExcelFile(file)
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    
+    # Import Inventory Sheet
+    for sheet in xls.sheet_names:
+        if sheet.lower() == "inventory":
+            df_inv = pd.read_excel(file, sheet_name=sheet)
+            cursor.execute("DELETE FROM inventory")
+            conn.commit()
+            df_inv.to_sql("inventory", conn, if_exists="append", index=False)
+            
+        elif sheet.lower() == "sales":
+            df_sales = pd.read_excel(file, sheet_name=sheet)
+            cursor.execute("DELETE FROM sales")
+            conn.commit()
+            df_sales.to_sql("sales", conn, if_exists="append", index=False)
+            
+    conn.close()
+
 # --- VISUAL COLOR THEME ENGINE ---
 def get_product_theme(product_name):
     n = str(product_name).lower()
@@ -147,7 +169,7 @@ authenticator = stauth.Authenticate(
 )
 
 st.title("🏢 NawatCore")
-st.caption("Official Inventory & Sales Management Portal (Standalone Engine)")
+st.caption("Official Inventory & Sales Management Portal")
 st.markdown("---")
 
 authenticator.login()
@@ -162,11 +184,23 @@ elif st.session_state.get("authentication_status"):
     st.sidebar.caption("Management Console")
     st.sidebar.write(f"Logged in as: **{st.session_state['name']}**")
     
-    # Download reminder in sidebar
-    st.sidebar.info("💡 **Backup Tip:** Download your Excel file below before deploying code changes to avoid data loss.")
+    st.sidebar.markdown("---")
+    st.sidebar.subheader("📤 Import Data from Excel")
+    uploaded_excel = st.sidebar.file_uploader("Upload Excel File (.xlsx)", type=["xlsx"])
+    if uploaded_excel is not None:
+        if st.sidebar.button("📥 Import & Replace Database", type="primary"):
+            try:
+                import_excel_to_sqlite(uploaded_excel)
+                st.sidebar.success("Database successfully updated from Excel file!")
+                st.rerun()
+            except Exception as e:
+                st.sidebar.error(f"Error importing file: {e}")
+
+    st.sidebar.markdown("---")
+    st.sidebar.subheader("💾 Export Backup")
     excel_data_side = generate_excel_bytes()
     st.sidebar.download_button(
-        label="💾 Backup Data (.xlsx)",
+        label="Download Backup (.xlsx)",
         data=excel_data_side,
         file_name=f"NawatCore_Backup_{datetime.now().strftime('%Y%m%d')}.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -234,17 +268,6 @@ elif st.session_state.get("authentication_status"):
             st.dataframe(units_display, width="stretch")
         else:
             st.info("No products in database.")
-
-        st.markdown("---")
-        st.subheader("📥 Local Data Export")
-        excel_data = generate_excel_bytes()
-        st.download_button(
-            label="📊 Download Complete NawatCore Excel Database (.xlsx)",
-            data=excel_data,
-            file_name=f"NawatCore_Full_Report_{datetime.now().strftime('%Y%m%d')}.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            type="primary",
-        )
 
     # -------------------------------------------------------------------
     # TAB 2: MANAGE INVENTORY, EDIT & RESTOCK
