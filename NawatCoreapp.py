@@ -31,45 +31,49 @@ def fetch_sheet_data(action):
         st.error(f"Error connecting to Google Sheets: {e}")
         return pd.DataFrame()
 
-def load_products_df():
-    df = fetch_sheet_data("getInventory")
-    if df.empty or "id" not in df.columns:
-        return pd.DataFrame(columns=["id", "name", "sku", "landed_cost", "default_price", "stock"])
-    df["id"] = pd.to_numeric(df["id"], errors='coerce').fillna(0).astype(int)
-    df["landed_cost"] = pd.to_numeric(df["landed_cost"], errors='coerce').fillna(0.0)
-    df["default_price"] = pd.to_numeric(df["default_price"], errors='coerce').fillna(0.0)
-    df["stock"] = pd.to_numeric(df["stock"], errors='coerce').fillna(0).astype(int)
-    return df
+# --- CACHED DATA LOADERS WITH SESSION STATE ---
+def load_products_df(force_reload=False):
+    if "products_df" not in st.session_state or force_reload:
+        df = fetch_sheet_data("getInventory")
+        if df.empty or "id" not in df.columns:
+            st.session_state["products_df"] = pd.DataFrame(columns=["id", "name", "sku", "landed_cost", "default_price", "stock"])
+        else:
+            df["id"] = pd.to_numeric(df["id"], errors='coerce').fillna(0).astype(int)
+            df["landed_cost"] = pd.to_numeric(df["landed_cost"], errors='coerce').fillna(0.0)
+            df["default_price"] = pd.to_numeric(df["default_price"], errors='coerce').fillna(0.0)
+            df["stock"] = pd.to_numeric(df["stock"], errors='coerce').fillna(0).astype(int)
+            st.session_state["products_df"] = df
+    return st.session_state["products_df"]
 
-def load_sales_df():
-    df = fetch_sheet_data("getSales")
-    if df.empty or "id" not in df.columns:
-        return pd.DataFrame(columns=[
-            "id", "product_id", "quantity", "unit_sale_price", "gross_total", 
-            "sale_type", "shipping_cost", "net_total", "landed_cost_total", 
-            "net_profit", "payment_method", "sale_date", "notes"
-        ])
-    df["id"] = pd.to_numeric(df["id"], errors='coerce').fillna(0).astype(int)
-    df["product_id"] = pd.to_numeric(df["product_id"], errors='coerce').fillna(0).astype(int)
-    df["quantity"] = pd.to_numeric(df["quantity"], errors='coerce').fillna(0).astype(int)
-    df["unit_sale_price"] = pd.to_numeric(df["unit_sale_price"], errors='coerce').fillna(0.0)
-    df["gross_total"] = pd.to_numeric(df["gross_total"], errors='coerce').fillna(0.0)
-    df["shipping_cost"] = pd.to_numeric(df["shipping_cost"], errors='coerce').fillna(0.0)
-    df["net_total"] = pd.to_numeric(df["net_total"], errors='coerce').fillna(0.0)
-    df["landed_cost_total"] = pd.to_numeric(df["landed_cost_total"], errors='coerce').fillna(0.0)
-    df["net_profit"] = pd.to_numeric(df["net_profit"], errors='coerce').fillna(0.0)
-    return df
+def load_sales_df(force_reload=False):
+    if "sales_df" not in st.session_state or force_reload:
+        df = fetch_sheet_data("getSales")
+        if df.empty or "id" not in df.columns:
+            st.session_state["sales_df"] = pd.DataFrame(columns=[
+                "id", "product_id", "quantity", "unit_sale_price", "gross_total", 
+                "sale_type", "shipping_cost", "net_total", "landed_cost_total", 
+                "net_profit", "payment_method", "sale_date", "notes"
+            ])
+        else:
+            df["id"] = pd.to_numeric(df["id"], errors='coerce').fillna(0).astype(int)
+            df["product_id"] = pd.to_numeric(df["product_id"], errors='coerce').fillna(0).astype(int)
+            df["quantity"] = pd.to_numeric(df["quantity"], errors='coerce').fillna(0).astype(int)
+            df["unit_sale_price"] = pd.to_numeric(df["unit_sale_price"], errors='coerce').fillna(0.0)
+            df["gross_total"] = pd.to_numeric(df["gross_total"], errors='coerce').fillna(0.0)
+            df["shipping_cost"] = pd.to_numeric(df["shipping_cost"], errors='coerce').fillna(0.0)
+            df["net_total"] = pd.to_numeric(df["net_total"], errors='coerce').fillna(0.0)
+            df["landed_cost_total"] = pd.to_numeric(df["landed_cost_total"], errors='coerce').fillna(0.0)
+            df["net_profit"] = pd.to_numeric(df["net_profit"], errors='coerce').fillna(0.0)
+            st.session_state["sales_df"] = df
+    return st.session_state["sales_df"]
 
 def send_to_google_sheet(payload):
-    """Sends payload to Google Sheets Webhook and returns status."""
+    """Sends payload asynchronously to Google Sheets Webhook."""
     try:
         response = requests.post(API_URL, json=payload, timeout=10)
-        if response.status_code == 200:
-            return True, response.text
-        else:
-            return False, f"Server HTTP status {response.status_code}: {response.text}"
-    except Exception as e:
-        return False, str(e)
+        return response.status_code == 200
+    except Exception:
+        return False
 
 # --- EXCEL GENERATOR HELPER ---
 def generate_excel_bytes(dataframes_dict):
@@ -79,7 +83,7 @@ def generate_excel_bytes(dataframes_dict):
             df.to_excel(writer, sheet_name=sheet_name, index=False)
     return output.getvalue()
 
-# --- 1. USER LOGIN CONFIGURATION ---
+# --- USER AUTHENTICATION ---
 def secrets_to_dict(obj):
     if hasattr(obj, "items"):
         return {k: secrets_to_dict(v) for k, v in obj.items()}
@@ -114,6 +118,13 @@ elif st.session_state.get("authentication_status"):
     st.sidebar.title("🏢 NawatCore")
     st.sidebar.caption("Management Console")
     st.sidebar.write(f"Logged in as: **{st.session_state['name']}**")
+    
+    if st.sidebar.button("🔄 Sync with Google Sheets"):
+        load_products_df(force_reload=True)
+        load_sales_df(force_reload=True)
+        st.toast("Refreshed live data from Google Sheets!", icon="🔄")
+        st.rerun()
+
     authenticator.logout("Log Out", "sidebar")
 
     st.title("📦 NawatCore | Inventory & Sales Management Hub")
@@ -133,7 +144,6 @@ elif st.session_state.get("authentication_status"):
         products_df = load_products_df()
         sales_raw_df = load_sales_df()
 
-        # Units Sold Calculation
         if not products_df.empty:
             if not sales_raw_df.empty and "product_id" in sales_raw_df.columns:
                 units_sold = sales_raw_df.groupby("product_id")["quantity"].sum().reset_index()
@@ -163,7 +173,7 @@ elif st.session_state.get("authentication_status"):
         st.markdown("---")
         st.subheader("📊 Product Sales Performance & Stock")
         if not units_display.empty:
-            st.dataframe(units_display, use_container_width=True)
+            st.dataframe(units_display, width="stretch")
         else:
             st.info("No products found in Google Sheets.")
 
@@ -190,7 +200,7 @@ elif st.session_state.get("authentication_status"):
         st.header("Inventory Management")
         inv_df = load_products_df()
 
-        # SECTION A: RESTOCK EXISTING ITEM
+        # RESTOCK
         if not inv_df.empty:
             st.subheader("🔄 Restock Existing Inventory Item")
             with st.form("restock_product_form", clear_on_submit=True):
@@ -205,22 +215,25 @@ elif st.session_state.get("authentication_status"):
                 
                 restock_submit = st.form_submit_button("📥 Add Stock to Inventory", type="primary")
                 if restock_submit:
-                    with st.spinner("Updating inventory in Google Sheets..."):
-                        payload = {
-                            "action": "restockProduct",
-                            "product_id": int(restock_item["id"]),
-                            "added_qty": int(added_stock)
-                        }
-                        success, message = send_to_google_sheet(payload)
-                        if success:
-                            st.success(f"Successfully added **+{added_stock} units** to **{restock_item['name']}**! New Stock: {int(restock_item['stock']) + added_stock}")
-                            st.rerun()
-                        else:
-                            st.error(f"Failed to update restock in Google Sheets: {message}")
+                    # 1. Update memory instantly
+                    idx = st.session_state["products_df"].index[st.session_state["products_df"]["id"] == int(restock_item["id"])].tolist()
+                    if idx:
+                        st.session_state["products_df"].at[idx[0], "stock"] += int(added_stock)
+
+                    # 2. Sync to Google Sheets
+                    payload = {
+                        "action": "restockProduct",
+                        "product_id": int(restock_item["id"]),
+                        "added_qty": int(added_stock)
+                    }
+                    send_to_google_sheet(payload)
+
+                    st.toast(f"Added +{added_stock} units to {restock_item['name']}!", icon="✅")
+                    st.rerun()
 
             st.markdown("---")
 
-        # SECTION B: ADD NEW PRODUCT
+        # ADD NEW PRODUCT
         st.subheader("➕ Add Brand New Product to Inventory")
         with st.form("add_product_form", clear_on_submit=True):
             col_a, col_b = st.columns(2)
@@ -236,25 +249,31 @@ elif st.session_state.get("authentication_status"):
                     if p_name.strip() in inv_df["name"].astype(str).values:
                         st.error("A product with this name already exists in Google Sheets.")
                     else:
-                        with st.spinner("Adding new product to Google Sheets..."):
-                            next_id = int(inv_df["id"].max() + 1) if not inv_df.empty and "id" in inv_df.columns else 1
-                            payload = {
-                                "action": "addProduct",
-                                "row": [next_id, p_name.strip(), p_sku.strip(), p_landed_cost, p_default_price, p_stock]
-                            }
-                            success, message = send_to_google_sheet(payload)
-                            if success:
-                                st.success(f"Added **{p_name}** permanently to Google Sheets!")
-                                st.rerun()
-                            else:
-                                st.error(f"Failed to write to Google Sheets: {message}")
+                        next_id = int(inv_df["id"].max() + 1) if not inv_df.empty and "id" in inv_df.columns else 1
+                        new_row = {
+                            "id": next_id, "name": p_name.strip(), "sku": p_sku.strip(),
+                            "landed_cost": p_landed_cost, "default_price": p_default_price, "stock": p_stock
+                        }
+                        
+                        # Update memory instantly
+                        st.session_state["products_df"] = pd.concat([st.session_state["products_df"], pd.DataFrame([new_row])], ignore_index=True)
+
+                        # Sync to Google Sheets
+                        payload = {
+                            "action": "addProduct",
+                            "row": [next_id, p_name.strip(), p_sku.strip(), p_landed_cost, p_default_price, p_stock]
+                        }
+                        send_to_google_sheet(payload)
+
+                        st.toast(f"Added {p_name} to Inventory!", icon="🎉")
+                        st.rerun()
                 else:
                     st.warning("Please enter a valid product name.")
 
         if not inv_df.empty:
             st.markdown("---")
-            st.subheader("Current Stock & Pricing (Google Sheets)")
-            st.dataframe(inv_df, use_container_width=True)
+            st.subheader("Current Stock & Pricing")
+            st.dataframe(inv_df, width="stretch")
 
     # -------------------------------------------------------------------
     # TAB 3: LOG SALES
@@ -307,27 +326,39 @@ elif st.session_state.get("authentication_status"):
                 st.error("This item is currently out of stock.")
             else:
                 if st.button("Complete Sale", type="primary"):
-                    with st.spinner("Logging sale to Google Sheets..."):
-                        sales_df_current = load_sales_df()
-                        next_sale_id = int(sales_df_current["id"].max() + 1) if not sales_df_current.empty and "id" in sales_df_current.columns else 1
+                    sales_df_mem = load_sales_df()
+                    next_sale_id = int(sales_df_mem["id"].max() + 1) if not sales_df_mem.empty and "id" in sales_df_mem.columns else 1
 
-                        payload = {
-                            "action": "addSale",
-                            "product_id": int(item["id"]),
-                            "qty": sale_qty,
-                            "row": [
-                                next_sale_id, int(item["id"]), sale_qty, actual_unit_price,
-                                gross_total, sale_type, shipping_cost, net_total,
-                                total_landed_cost, net_profit, payment_method,
-                                sale_timestamp, sale_notes.strip()
-                            ]
-                        }
-                        success, message = send_to_google_sheet(payload)
-                        if success:
-                            st.success("Sale logged permanently in Google Sheets!")
-                            st.rerun()
-                        else:
-                            st.error(f"Failed to write sale to Google Sheets: {message}")
+                    new_sale_row = {
+                        "id": next_sale_id, "product_id": int(item["id"]), "quantity": sale_qty,
+                        "unit_sale_price": actual_unit_price, "gross_total": gross_total,
+                        "sale_type": sale_type, "shipping_cost": shipping_cost, "net_total": net_total,
+                        "landed_cost_total": total_landed_cost, "net_profit": net_profit,
+                        "payment_method": payment_method, "sale_date": sale_timestamp, "notes": sale_notes.strip()
+                    }
+
+                    # 1. Update memory instantly
+                    st.session_state["sales_df"] = pd.concat([st.session_state["sales_df"], pd.DataFrame([new_sale_row])], ignore_index=True)
+                    p_idx = st.session_state["products_df"].index[st.session_state["products_df"]["id"] == int(item["id"])].tolist()
+                    if p_idx:
+                        st.session_state["products_df"].at[p_idx[0], "stock"] -= sale_qty
+
+                    # 2. Sync to Google Sheets
+                    payload = {
+                        "action": "addSale",
+                        "product_id": int(item["id"]),
+                        "qty": sale_qty,
+                        "row": [
+                            next_sale_id, int(item["id"]), sale_qty, actual_unit_price,
+                            gross_total, sale_type, shipping_cost, net_total,
+                            total_landed_cost, net_profit, payment_method,
+                            sale_timestamp, sale_notes.strip()
+                        ]
+                    }
+                    send_to_google_sheet(payload)
+
+                    st.toast("Sale logged permanently!", icon="🛒")
+                    st.rerun()
         else:
             st.info("Add products to inventory before logging sales.")
 
@@ -404,7 +435,7 @@ elif st.session_state.get("authentication_status"):
                 'Gross Rev', 'Shipping Cost', 'Net Revenue', 'Net Profit', 'Margin %', 
                 'Payment Method', 'Type', 'Comments / Notes'
             ]
-            st.dataframe(display_ledger[cols_to_show], use_container_width=True)
+            st.dataframe(display_ledger[cols_to_show], width="stretch")
 
             st.markdown("---")
 
@@ -443,35 +474,44 @@ elif st.session_state.get("authentication_status"):
 
                 e_notes = st.text_input("Comments / Notes", value=str(s_edit["Comments / Notes"]))
 
-                # Calculate updated totals
                 e_gross = e_qty * e_unit_price
                 e_net = e_gross - e_shipping
                 e_landed_total = e_qty * float(s_edit["landed_cost"])
                 e_profit = e_net - e_landed_total
-                
-                # Difference in quantity to adjust inventory stock
                 qty_difference = e_qty - int(s_edit["Qty"])
 
                 btn_edit = st.form_submit_button("💾 Save Updated Sale Record", type="primary")
                 if btn_edit:
-                    with st.spinner("Updating sale record in Google Sheets..."):
-                        payload = {
-                            "action": "editSale",
-                            "sale_id": int(s_edit["Sale ID"]),
-                            "product_id": int(s_edit["product_id"]),
-                            "qty_diff": qty_difference,
-                            "row": [
-                                int(s_edit["Sale ID"]), int(s_edit["product_id"]), e_qty, e_unit_price,
-                                e_gross, e_type, e_shipping, e_net,
-                                e_landed_total, e_profit, e_payment,
-                                e_timestamp, e_notes.strip()
-                            ]
-                        }
-                        success, message = send_to_google_sheet(payload)
-                        if success:
-                            st.success(f"Sale ID #{s_edit['Sale ID']} updated successfully in Google Sheets!")
-                            st.rerun()
-                        else:
-                            st.error(f"Failed to update sale record: {message}")
+                    # Update memory instantly
+                    s_idx = st.session_state["sales_df"].index[st.session_state["sales_df"]["id"] == int(s_edit["Sale ID"])].tolist()
+                    if s_idx:
+                        st.session_state["sales_df"].loc[s_idx[0]] = [
+                            int(s_edit["Sale ID"]), int(s_edit["product_id"]), e_qty, e_unit_price,
+                            e_gross, e_type, e_shipping, e_net,
+                            e_landed_total, e_profit, e_payment,
+                            e_timestamp, e_notes.strip()
+                        ]
+                    if qty_difference != 0:
+                        p_idx = st.session_state["products_df"].index[st.session_state["products_df"]["id"] == int(s_edit["product_id"])].tolist()
+                        if p_idx:
+                            st.session_state["products_df"].at[p_idx[0], "stock"] -= qty_difference
+
+                    # Sync to Google Sheets
+                    payload = {
+                        "action": "editSale",
+                        "sale_id": int(s_edit["Sale ID"]),
+                        "product_id": int(s_edit["product_id"]),
+                        "qty_diff": qty_difference,
+                        "row": [
+                            int(s_edit["Sale ID"]), int(s_edit["product_id"]), e_qty, e_unit_price,
+                            e_gross, e_type, e_shipping, e_net,
+                            e_landed_total, e_profit, e_payment,
+                            e_timestamp, e_notes.strip()
+                        ]
+                    }
+                    send_to_google_sheet(payload)
+
+                    st.toast(f"Updated Sale ID #{s_edit['Sale ID']}!", icon="✏️")
+                    st.rerun()
         else:
             st.info("No sales recorded yet.")
