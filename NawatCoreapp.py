@@ -25,6 +25,58 @@ DEFAULT_CATEGORIES = [
     "General Accessories",
 ]
 
+# --- VISUAL COLOR THEME ENGINE ---
+def get_product_theme(product_name):
+    """Auto-detects product theme and returns (icon, border_color, bg_color, text_color)."""
+    n = str(product_name).lower()
+    if any(w in n for w in ["rosewood", "walnut", "wood", "brown", "oak", "mahogany"]):
+        return "🪵", "#8B4513", "#FDF6E2", "#4A2306"
+    elif any(w in n for w in ["black", "dark", "matte", "obsidian", "night"]):
+        return "⚫", "#333333", "#F2F2F2", "#111111"
+    elif any(w in n for w in ["silver", "steel", "stainless", "chrome", "grey", "gray", "metal"]):
+        return "⚙️", "#718096", "#EDF2F7", "#1A202C"
+    elif any(w in n for w in ["white", "cream", "ivory"]):
+        return "⚪", "#CBD5E0", "#F7FAFC", "#2D3748"
+    elif any(w in n for w in ["duster", "air", "blower"]):
+        return "💨", "#319795", "#E6FFFA", "#234E52"
+    else:
+        return "📦", "#4A5568", "#F7FAFC", "#1A202C"
+
+def render_product_card(row, subtitle="Product Overview"):
+    """Renders a styled HTML highlight card matching the item's theme."""
+    icon, border_col, bg_col, text_col = get_product_theme(row['name'])
+    cat = row.get('category', 'General')
+    price = float(row.get('default_price', 0.0))
+    stock = int(row.get('stock', 0))
+    landed = float(row.get('landed_cost', 0.0))
+    sku = row.get('sku', 'N/A')
+    
+    card_html = f"""
+    <div style="
+        border-left: 6px solid {border_col};
+        background-color: {bg_col};
+        color: {text_col};
+        padding: 14px 18px;
+        border-radius: 8px;
+        margin-top: 10px;
+        margin-bottom: 18px;
+        box-shadow: 0 1px 3px rgba(0,0,0,0.08);
+    ">
+        <div style="font-size: 0.85em; font-weight: bold; text-transform: uppercase; letter-spacing: 0.5px; opacity: 0.75; margin-bottom: 2px;">
+            {subtitle}
+        </div>
+        <div style="font-size: 1.15em; font-weight: bold; margin-bottom: 6px;">
+            {icon} {row['name']} <span style="font-size: 0.85em; font-weight: normal; opacity: 0.85;">({cat} | SKU: {sku})</span>
+        </div>
+        <div style="font-size: 0.95em; display: flex; gap: 24px; flex-wrap: wrap;">
+            <span>📦 <b>In Stock:</b> {stock} units</span>
+            <span>🏷️ <b>Set Price:</b> ${price:.2f}</span>
+            <span>💵 <b>Landed Cost:</b> ${landed:.2f}</span>
+        </div>
+    </div>
+    """
+    st.markdown(card_html, unsafe_allow_html=True)
+
 def fetch_sheet_data(action):
     """Fetches data directly from Google Apps Script Webhook."""
     if not API_URL:
@@ -159,7 +211,6 @@ elif st.session_state.get("authentication_status"):
 
         if not products_df.empty:
             if not sales_raw_df.empty and "product_id" in sales_raw_df.columns:
-                # Group sales to get total units sold and total net profit per product
                 prod_stats = sales_raw_df.groupby("product_id").agg(
                     Total_Units_Sold=("quantity", "sum"),
                     Total_Net_Profit=("net_profit", "sum")
@@ -173,10 +224,14 @@ elif st.session_state.get("authentication_status"):
                 units_sold_df["Total Units Sold"] = 0
                 units_sold_df["Total Net Profit"] = "$0.00"
             
-            units_display = units_sold_df[["id", "name", "sku", "category", "stock", "Total Units Sold", "Total Net Profit"]].rename(
+            # Prepend visual color icon to Product Name
+            units_sold_df["Product Name"] = units_sold_df["name"].apply(
+                lambda name: f"{get_product_theme(name)[0]} {name}"
+            )
+
+            units_display = units_sold_df[["id", "Product Name", "sku", "category", "stock", "Total Units Sold", "Total Net Profit"]].rename(
                 columns={
                     "id": "ID", 
-                    "name": "Product Name", 
                     "sku": "SKU", 
                     "category": "Category", 
                     "stock": "In Stock",
@@ -227,18 +282,20 @@ elif st.session_state.get("authentication_status"):
         st.header("Inventory Management")
         inv_df = load_products_df()
 
-        # Build master category options
         existing_cats = sorted(list(set(inv_df["category"].dropna().unique().tolist() + DEFAULT_CATEGORIES)))
 
         # SECTION A: EDIT EXISTING INVENTORY ITEM DETAILS / FIX PRICE
         if not inv_df.empty:
             st.subheader("✏️ Edit Product Details (Fix Price, Name, Category, or SKU)")
             edit_item_options = {
-                f"{row['name']} (Category: {row['category']} | Price: ${row['default_price']:.2f} | Stock: {row['stock']})": row
+                f"{get_product_theme(row['name'])[0]} {row['name']} (Cat: {row['category']} | Price: ${row['default_price']:.2f} | Stock: {row['stock']})": row
                 for _, row in inv_df.iterrows()
             }
             selected_edit_label = st.selectbox("Select Item to Update", list(edit_item_options.keys()))
             p_edit = edit_item_options[selected_edit_label]
+
+            # Dynamic Highlight Banner Card for Selected Edit Item
+            render_product_card(p_edit, subtitle="Selected Item for Edit")
 
             with st.form("edit_product_form"):
                 ec1, ec2 = st.columns(2)
@@ -259,7 +316,6 @@ elif st.session_state.get("authentication_status"):
                 if btn_save_prod:
                     final_cat = ep_custom_cat.strip() if ep_custom_cat.strip() else ep_cat_select
                     
-                    # Update memory instantly
                     idx = st.session_state["products_df"].index[st.session_state["products_df"]["id"] == int(p_edit["id"])].tolist()
                     if idx:
                         st.session_state["products_df"].loc[idx[0]] = [
@@ -267,7 +323,6 @@ elif st.session_state.get("authentication_status"):
                             final_cat, ep_landed_cost, ep_default_price, ep_stock
                         ]
 
-                    # Sync to Google Sheets
                     payload = {
                         "action": "editProduct",
                         "product_id": int(p_edit["id"]),
@@ -284,7 +339,7 @@ elif st.session_state.get("authentication_status"):
             st.subheader("🔄 Restock Existing Inventory Item")
             with st.form("restock_product_form", clear_on_submit=True):
                 restock_options = {
-                    f"{row['name']} (Current Stock: {row['stock']} | SKU: {row['sku']})": row
+                    f"{get_product_theme(row['name'])[0]} {row['name']} (Current Stock: {row['stock']} | SKU: {row['sku']})": row
                     for _, row in inv_df.iterrows()
                 }
                 selected_restock_label = st.selectbox("Select Product to Restock", list(restock_options.keys()))
@@ -354,10 +409,12 @@ elif st.session_state.get("authentication_status"):
         if not inv_df.empty:
             st.markdown("---")
             st.subheader("Current Stock & Pricing")
-            st.dataframe(inv_df, width="stretch")
+            inv_display = inv_df.copy()
+            inv_display["name"] = inv_display["name"].apply(lambda name: f"{get_product_theme(name)[0]} {name}")
+            st.dataframe(inv_display, width="stretch")
 
     # -------------------------------------------------------------------
-    # TAB 3: LOG SALES WITH CATEGORY FILTER
+    # TAB 3: LOG SALES WITH CATEGORY FILTER & THEMED HIGHLIGHT CARD
     # -------------------------------------------------------------------
     with tabs[2]:
         st.header("Record a NawatCore Transaction")
@@ -375,11 +432,14 @@ elif st.session_state.get("authentication_status"):
 
             if not filtered_products_df.empty:
                 product_options = {
-                    f"[{row['category']}] {row['name']} (Stock: {row['stock']} | Set Price: ${row['default_price']:.2f})": row
+                    f"{get_product_theme(row['name'])[0]} [{row['category']}] {row['name']} (Stock: {row['stock']} | Set Price: ${row['default_price']:.2f})": row
                     for _, row in filtered_products_df.iterrows()
                 }
                 selected_option = st.selectbox("Select Item to Sell", list(product_options.keys()))
                 item = product_options[selected_option]
+
+                # Dynamic Color-Themed Highlight Card for Selected Sale Item
+                render_product_card(item, subtitle="Selected Product Details")
 
                 col1, col2 = st.columns(2)
 
@@ -476,6 +536,11 @@ elif st.session_state.get("authentication_status"):
                 "notes": "Comments / Notes"
             })
             sales_merged["Product"] = sales_merged["Product"].fillna("Unknown Product")
+
+            # Prepend theme icon to Product column in ledger
+            sales_merged["Product"] = sales_merged["Product"].apply(
+                lambda name: f"{get_product_theme(name)[0]} {name}"
+            )
 
             sales_merged['parsed_dt'] = pd.to_datetime(sales_merged['Date & Time'], errors='coerce')
             sales_merged['parsed_date'] = sales_merged['parsed_dt'].dt.date
