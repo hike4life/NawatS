@@ -12,10 +12,9 @@ st.set_page_config(
     page_icon="🏢",
 )
 
-# --- MOBILE ADAPTABILITY & RESPONSIVE CSS INJECTION (DARK MODE COMPATIBLE) ---
+# --- MOBILE ADAPTABILITY & RESPONSIVE CSS INJECTION ---
 st.markdown("""
 <style>
-    /* Adjust page margins for narrow mobile screens */
     @media (max-width: 768px) {
         .main .block-container {
             padding-left: 0.75rem !important;
@@ -23,11 +22,9 @@ st.markdown("""
             padding-top: 1rem !important;
             padding-bottom: 2rem !important;
         }
-        /* Touch-friendly full width buttons on mobile */
         .stButton > button, div[data-baseweb="select"] {
             width: 100% !important;
         }
-        /* Theme-adaptive mobile card styling for st.metric widgets */
         div[data-testid="stMetric"] {
             background-color: rgba(128, 128, 128, 0.08) !important;
             border: 1px solid rgba(128, 128, 128, 0.2) !important;
@@ -35,10 +32,9 @@ st.markdown("""
             border-radius: 8px !important;
             margin-bottom: 8px !important;
         }
-        /* Responsive tab text size */
         button[data-baseweb="tab"] {
-            font-size: 0.85em !important;
-            padding: 6px 8px !important;
+            font-size: 0.8em !important;
+            padding: 6px 6px !important;
         }
     }
 </style>
@@ -130,6 +126,30 @@ def import_excel_to_sqlite(file):
             conn.commit()
             df_sales.to_sql("sales", conn, if_exists="append", index=False)
             
+    conn.close()
+
+def execute_quick_sale(product_row, qty=1, payment_method="Cash", channel="Local", notes="Quick Express Log"):
+    """Helper to log a fast sale transaction and adjust inventory stock instantly."""
+    p_id = int(product_row["id"])
+    unit_price = float(product_row["default_price"])
+    landed_unit = float(product_row["landed_cost"])
+    
+    gross = qty * unit_price
+    shipping = 0.0
+    net = gross - shipping
+    landed_tot = qty * landed_unit
+    profit = net - landed_tot
+    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute("""
+        INSERT INTO sales (product_id, quantity, unit_sale_price, gross_total, sale_type, shipping_cost, net_total, landed_cost_total, net_profit, payment_method, sale_date, notes)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """, (p_id, qty, unit_price, gross, channel, shipping, net, landed_tot, profit, payment_method, now_str, notes))
+    
+    cursor.execute("UPDATE inventory SET stock = stock - ? WHERE id = ?", (qty, p_id))
+    conn.commit()
     conn.close()
 
 # --- VISUAL COLOR THEME ENGINE ---
@@ -244,8 +264,9 @@ elif st.session_state.get("authentication_status"):
 
     tabs = st.tabs([
         "📊 Dashboard",
+        "⚡ Express Sale",
+        "🛒 Detailed Sale",
         "➕ Manage Inventory",
-        "🛒 Log Sales",
         "📜 Sales Ledger",
     ])
 
@@ -295,7 +316,7 @@ elif st.session_state.get("authentication_status"):
 
         st.markdown("---")
 
-        # RECENT SALES SUMMARY (LAST 5 TRANSACTIONS)
+        # RECENT SALES SUMMARY
         st.subheader("⚡ Recent Activity (Last 5 Sales)")
         if not sales_raw_df.empty and not products_df.empty:
             recent_sales = sales_raw_df.sort_values(by="id", ascending=False).head(5).copy()
@@ -337,9 +358,122 @@ elif st.session_state.get("authentication_status"):
             st.info("No products in database.")
 
     # -------------------------------------------------------------------
-    # TAB 2: MANAGE INVENTORY, CATEGORY FILTER & EDIT ITEMS
+    # TAB 2: ⚡ EXPRESS SALE (1-TAP CHECKOUT)
     # -------------------------------------------------------------------
     with tabs[1]:
+        st.header("⚡ Express Checkout (1-Tap Fast Log)")
+        st.caption("Tap any product button below to instantly record a 1-unit sale at default price!")
+        products_df = load_products_df()
+
+        if not products_df.empty:
+            # Payment Method Quick Toggle
+            quick_pay = st.radio("Payment Method for Express Log", ["Cash", "Venmo", "Zelle", "Apple Pay", "Ebay", "MP"], horizontal=True)
+            st.markdown("---")
+
+            st.subheader("🔥 Quick Tap Best Sellers")
+            # Filter in-stock items
+            in_stock_df = products_df[products_df["stock"] > 0]
+
+            if not in_stock_df.empty:
+                cols = st.columns(2)
+                for idx, (_, row) in enumerate(in_stock_df.iterrows()):
+                    col_target = cols[idx % 2]
+                    icon, _, _, _ = get_product_theme(row["name"])
+                    btn_label = f"{icon} Sell 1x {row['name']} (${row['default_price']:.2f}) | Stock: {row['stock']}"
+                    
+                    if col_target.button(btn_label, key=f"quick_btn_{row['id']}", use_container_width=True):
+                        execute_quick_sale(row, qty=1, payment_method=quick_pay)
+                        st.toast(f"Logged 1x {row['name']} via {quick_pay}!", icon="⚡")
+                        st.rerun()
+            else:
+                st.warning("All inventory items currently show 0 stock.")
+
+            st.markdown("---")
+            st.subheader("🚀 Fast Quantity Log")
+            with st.form("express_custom_form"):
+                ex_item_options = {
+                    f"{get_product_theme(r['name'])[0]} {r['name']} (Stock: {r['stock']} | ${r['default_price']:.2f})": r
+                    for _, r in products_df.iterrows()
+                }
+                sel_ex_label = st.selectbox("Select Product", list(ex_item_options.keys()))
+                ex_item = ex_item_options[sel_ex_label]
+
+                fc1, fc2 = st.columns(2)
+                ex_qty = fc1.number_input("Quantity", min_value=1, max_value=int(ex_item['stock']) if ex_item['stock'] > 0 else 1, value=1, step=1)
+                ex_price = fc2.number_input("Unit Price ($)", min_value=0.0, value=float(ex_item['default_price']), step=0.50)
+
+                btn_ex_submit = st.form_submit_button("⚡ Instant Log Sale", type="primary", use_container_width=True)
+                if btn_ex_submit:
+                    # Update row price if custom price entered
+                    ex_item_copy = ex_item.copy()
+                    ex_item_copy["default_price"] = ex_price
+                    execute_quick_sale(ex_item_copy, qty=ex_qty, payment_method=quick_pay, notes="Express Form Log")
+                    st.toast(f"Logged {ex_qty}x {ex_item['name']}!", icon="🚀")
+                    st.rerun()
+
+    # -------------------------------------------------------------------
+    # TAB 3: DETAILED SALE (FULL CONTROL)
+    # -------------------------------------------------------------------
+    with tabs[2]:
+        st.header("Record Detailed Transaction")
+        products_df = load_products_df()
+
+        if not products_df.empty:
+            st.subheader("🔍 Narrow Search by Category")
+            avail_cats = ["All Categories"] + sorted(list(products_df["category"].dropna().unique()))
+            selected_sale_cat = st.selectbox("Filter Product List by Category", avail_cats)
+
+            if selected_sale_cat != "All Categories":
+                filtered_sale_prods = products_df[products_df["category"] == selected_sale_cat]
+            else:
+                filtered_sale_prods = products_df
+
+            if not filtered_sale_prods.empty:
+                product_options = {
+                    f"{get_product_theme(row['name'])[0]} [{row['category']}] {row['name']} (Stock: {row['stock']} | ${row['default_price']:.2f})": row
+                    for _, row in filtered_sale_prods.iterrows()
+                }
+                selected_option = st.selectbox("Select Item to Sell", list(product_options.keys()))
+                item = product_options[selected_option]
+
+                render_product_card(item, subtitle="Selected Sale Details")
+
+                col1, col2 = st.columns(2)
+                sale_qty = col1.number_input("Quantity Sold", min_value=1, max_value=int(item["stock"]) if item["stock"] > 0 else 1, step=1)
+                actual_unit_price = col1.number_input("Sale Price per Unit ($)", min_value=0.0, value=float(item["default_price"]), step=0.50)
+                sale_type = col1.radio("Sale Channel", ["Local", "Online"], horizontal=True)
+                shipping_cost = col1.number_input("Shipping Paid ($)", min_value=0.0, value=0.0, step=0.50) if sale_type == "Online" else 0.0
+
+                payment_method = col2.selectbox("Payment Method", ["Cash", "Venmo", "Zelle", "Apple Pay", "Cash App", "Ebay", "MP", "Other"])
+                transaction_date = col2.date_input("Transaction Date", datetime.now())
+                sale_timestamp = transaction_date.strftime("%Y-%m-%d %H:%M:%S")
+
+                sale_notes = st.text_input("Order Notes (Optional)", placeholder="Customer name, pickup info, etc.")
+
+                gross_total = sale_qty * actual_unit_price
+                net_total = gross_total - shipping_cost
+                total_landed_cost = sale_qty * float(item["landed_cost"])
+                net_profit = net_total - total_landed_cost
+
+                if st.button("Complete Detailed Sale", type="primary", use_container_width=True):
+                    conn = get_db_connection()
+                    cursor = conn.cursor()
+                    cursor.execute("""
+                        INSERT INTO sales (product_id, quantity, unit_sale_price, gross_total, sale_type, shipping_cost, net_total, landed_cost_total, net_profit, payment_method, sale_date, notes)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """, (int(item["id"]), sale_qty, actual_unit_price, gross_total, sale_type, shipping_cost, net_total, total_landed_cost, net_profit, payment_method, sale_timestamp, sale_notes.strip()))
+                    
+                    cursor.execute("UPDATE inventory SET stock = stock - ? WHERE id = ?", (sale_qty, int(item["id"])))
+                    conn.commit()
+                    conn.close()
+
+                    st.toast("Sale logged permanently!", icon="🛒")
+                    st.rerun()
+
+    # -------------------------------------------------------------------
+    # TAB 4: MANAGE INVENTORY, CATEGORY FILTER & EDIT ITEMS
+    # -------------------------------------------------------------------
+    with tabs[3]:
         st.header("Inventory Management")
         inv_df = load_products_df()
 
@@ -430,68 +564,9 @@ elif st.session_state.get("authentication_status"):
             )
 
     # -------------------------------------------------------------------
-    # TAB 3: LOG SALES (WITH CATEGORY FILTER)
+    # TAB 5: SALES HISTORY, FILTERS & EDIT TRANSACTIONS
     # -------------------------------------------------------------------
-    with tabs[2]:
-        st.header("Record a NawatCore Transaction")
-        products_df = load_products_df()
-
-        if not products_df.empty:
-            st.subheader("🔍 Narrow Search by Category")
-            avail_cats = ["All Categories"] + sorted(list(products_df["category"].dropna().unique()))
-            selected_sale_cat = st.selectbox("Filter Product List by Category", avail_cats)
-
-            if selected_sale_cat != "All Categories":
-                filtered_sale_prods = products_df[products_df["category"] == selected_sale_cat]
-            else:
-                filtered_sale_prods = products_df
-
-            if not filtered_sale_prods.empty:
-                product_options = {
-                    f"{get_product_theme(row['name'])[0]} [{row['category']}] {row['name']} (Stock: {row['stock']} | ${row['default_price']:.2f})": row
-                    for _, row in filtered_sale_prods.iterrows()
-                }
-                selected_option = st.selectbox("Select Item to Sell", list(product_options.keys()))
-                item = product_options[selected_option]
-
-                render_product_card(item, subtitle="Selected Sale Details")
-
-                col1, col2 = st.columns(2)
-                sale_qty = col1.number_input("Quantity Sold", min_value=1, max_value=int(item["stock"]) if item["stock"] > 0 else 1, step=1)
-                actual_unit_price = col1.number_input("Sale Price per Unit ($)", min_value=0.0, value=float(item["default_price"]), step=0.50)
-                sale_type = col1.radio("Sale Channel", ["Local", "Online"], horizontal=True)
-                shipping_cost = col1.number_input("Shipping Paid ($)", min_value=0.0, value=0.0, step=0.50) if sale_type == "Online" else 0.0
-
-                payment_method = col2.selectbox("Payment Method", ["Cash", "Venmo", "Zelle", "Apple Pay", "Cash App", "Ebay", "MP", "Other"])
-                transaction_date = col2.date_input("Transaction Date", datetime.now())
-                sale_timestamp = transaction_date.strftime("%Y-%m-%d %H:%M:%S")
-
-                sale_notes = st.text_input("Order Notes (Optional)", placeholder="Customer name, pickup info, etc.")
-
-                gross_total = sale_qty * actual_unit_price
-                net_total = gross_total - shipping_cost
-                total_landed_cost = sale_qty * float(item["landed_cost"])
-                net_profit = net_total - total_landed_cost
-
-                if st.button("Complete Sale", type="primary", use_container_width=True):
-                    conn = get_db_connection()
-                    cursor = conn.cursor()
-                    cursor.execute("""
-                        INSERT INTO sales (product_id, quantity, unit_sale_price, gross_total, sale_type, shipping_cost, net_total, landed_cost_total, net_profit, payment_method, sale_date, notes)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """, (int(item["id"]), sale_qty, actual_unit_price, gross_total, sale_type, shipping_cost, net_total, total_landed_cost, net_profit, payment_method, sale_timestamp, sale_notes.strip()))
-                    
-                    cursor.execute("UPDATE inventory SET stock = stock - ? WHERE id = ?", (sale_qty, int(item["id"])))
-                    conn.commit()
-                    conn.close()
-
-                    st.toast("Sale logged permanently!", icon="🛒")
-                    st.rerun()
-
-    # -------------------------------------------------------------------
-    # TAB 4: SALES HISTORY, FILTERS & EDIT TRANSACTIONS
-    # -------------------------------------------------------------------
-    with tabs[3]:
+    with tabs[4]:
         st.header("NawatCore Sales Ledger & Order Editing")
         sales_raw_df = load_sales_df()
         products_df = load_products_df()
