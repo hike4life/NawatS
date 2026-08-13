@@ -541,67 +541,86 @@ elif st.session_state.get("authentication_status"):
 
             st.markdown("---")
 
-            # EDIT TRANSACTION SECTION
-            st.subheader("✏️ Modify / Edit Existing Sale Record")
-            st.caption("Select a sale below to adjust pricing, quantities, notes, or payment methods.")
+            # EDIT OR DELETE TRANSACTION SECTION
+            st.subheader("✏️ Modify or Delete Existing Sale Record")
+            st.caption("The list below automatically filters to show only the matching sales from the table above.")
 
-            sale_list = {
-                f"Sale #{row['id']} - {row['Product Display']} (Qty: {row['quantity']} | ${row['gross_total']:.2f} on {row['sale_date']})": row
-                for _, row in sales_merged.iterrows()
-            }
-            selected_sale_label = st.selectbox("Select Sale Record to Modify", list(sale_list.keys()))
-            s_edit = sale_list[selected_sale_label]
+            if not filtered_ledger.empty:
+                sale_list = {
+                    f"Sale #{row['id']} - {row['Product Display']} (Qty: {row['quantity']} | ${row['gross_total']:.2f} on {row['sale_date']})": row
+                    for _, row in filtered_ledger.iterrows()
+                }
+                selected_sale_label = st.selectbox("Select Sale Record to Modify or Delete", list(sale_list.keys()))
+                s_edit = sale_list[selected_sale_label]
 
-            with st.form("edit_sale_form"):
-                ec1, ec2 = st.columns(2)
+                with st.form("edit_sale_form"):
+                    ec1, ec2 = st.columns(2)
 
-                with ec1:
-                    e_qty = ec1.number_input("Quantity Sold", min_value=1, value=int(s_edit["quantity"]), step=1)
-                    e_unit_price = ec1.number_input("Sale Price per Unit ($)", min_value=0.0, value=float(s_edit["unit_sale_price"]), step=0.50)
-                    e_type = ec1.radio("Sale Channel", ["Local", "Online"], index=0 if s_edit["sale_type"] == "Local" else 1, horizontal=True)
-                    
-                    e_shipping = 0.0
-                    if e_type == "Online":
-                        e_shipping = ec1.number_input("Shipping Paid ($)", min_value=0.0, value=float(s_edit["shipping_cost"]), step=0.50)
+                    with ec1:
+                        e_qty = ec1.number_input("Quantity Sold", min_value=1, value=int(s_edit["quantity"]), step=1)
+                        e_unit_price = ec1.number_input("Sale Price per Unit ($)", min_value=0.0, value=float(s_edit["unit_sale_price"]), step=0.50)
+                        e_type = ec1.radio("Sale Channel", ["Local", "Online"], index=0 if s_edit["sale_type"] == "Local" else 1, horizontal=True)
+                        
+                        e_shipping = 0.0
+                        if e_type == "Online":
+                            e_shipping = ec1.number_input("Shipping Paid ($)", min_value=0.0, value=float(s_edit["shipping_cost"]), step=0.50)
 
-                with ec2:
-                    pay_options = ["Cash", "Venmo", "Zelle", "Apple Pay", "Cash App", "Ebay", "MP", "Other"]
-                    default_pay_idx = pay_options.index(s_edit["payment_method"]) if s_edit["payment_method"] in pay_options else 0
-                    e_payment = ec2.selectbox("Payment Method", pay_options, index=default_pay_idx)
-                    
-                    parsed_dt = pd.to_datetime(s_edit["sale_date"], errors='coerce')
-                    if pd.isna(parsed_dt):
-                        parsed_dt = datetime.now()
+                    with ec2:
+                        pay_options = ["Cash", "Venmo", "Zelle", "Apple Pay", "Cash App", "Ebay", "MP", "Other"]
+                        default_pay_idx = pay_options.index(s_edit["payment_method"]) if s_edit["payment_method"] in pay_options else 0
+                        e_payment = ec2.selectbox("Payment Method", pay_options, index=default_pay_idx)
+                        
+                        parsed_dt = pd.to_datetime(s_edit["sale_date"], errors='coerce')
+                        if pd.isna(parsed_dt):
+                            parsed_dt = datetime.now()
 
-                    e_date = ec2.date_input("Transaction Date", parsed_dt.date())
-                    e_timestamp = e_date.strftime("%Y-%m-%d %H:%M:%S")
+                        e_date = ec2.date_input("Transaction Date", parsed_dt.date())
+                        e_timestamp = e_date.strftime("%Y-%m-%d %H:%M:%S")
 
-                e_notes = st.text_input("Comments / Notes", value=str(s_edit["notes"]) if pd.notna(s_edit["notes"]) else "")
+                    e_notes = st.text_input("Comments / Notes", value=str(s_edit["notes"]) if pd.notna(s_edit["notes"]) else "")
 
-                e_gross = e_qty * e_unit_price
-                e_net = e_gross - e_shipping
-                item_landed = float(s_edit["prod_landed_cost"]) if pd.notna(s_edit["prod_landed_cost"]) else 0.0
-                e_landed_total = e_qty * item_landed
-                e_profit = e_net - e_landed_total
-                qty_difference = e_qty - int(s_edit["quantity"])
+                    e_gross = e_qty * e_unit_price
+                    e_net = e_gross - e_shipping
+                    item_landed = float(s_edit["prod_landed_cost"]) if pd.notna(s_edit["prod_landed_cost"]) else 0.0
+                    e_landed_total = e_qty * item_landed
+                    e_profit = e_net - e_landed_total
+                    qty_difference = e_qty - int(s_edit["quantity"])
 
-                btn_edit = st.form_submit_button("💾 Save Updated Sale Record", type="primary")
-                if btn_edit:
-                    conn = get_db_connection()
-                    cursor = conn.cursor()
-                    cursor.execute("""
-                        UPDATE sales 
-                        SET quantity=?, unit_sale_price=?, gross_total=?, sale_type=?, shipping_cost=?, net_total=?, landed_cost_total=?, net_profit=?, payment_method=?, sale_date=?, notes=?
-                        WHERE id=?
-                    """, (e_qty, e_unit_price, e_gross, e_type, e_shipping, e_net, e_landed_total, e_profit, e_payment, e_timestamp, e_notes.strip(), int(s_edit["id"])))
+                    btn_col1, btn_col2 = st.columns(2)
+                    btn_edit = btn_col1.form_submit_button("💾 Save Updated Sale Record", type="primary", use_container_width=True)
+                    btn_delete = btn_col2.form_submit_button("🗑️ Fully Delete Sale Record", type="secondary", use_container_width=True)
 
-                    if qty_difference != 0:
-                        cursor.execute("UPDATE inventory SET stock = stock - ? WHERE id = ?", (qty_difference, int(s_edit["product_id"])))
+                    if btn_edit:
+                        conn = get_db_connection()
+                        cursor = conn.cursor()
+                        cursor.execute("""
+                            UPDATE sales 
+                            SET quantity=?, unit_sale_price=?, gross_total=?, sale_type=?, shipping_cost=?, net_total=?, landed_cost_total=?, net_profit=?, payment_method=?, sale_date=?, notes=?
+                            WHERE id=?
+                        """, (e_qty, e_unit_price, e_gross, e_type, e_shipping, e_net, e_landed_total, e_profit, e_payment, e_timestamp, e_notes.strip(), int(s_edit["id"])))
 
-                    conn.commit()
-                    conn.close()
+                        if qty_difference != 0:
+                            cursor.execute("UPDATE inventory SET stock = stock - ? WHERE id = ?", (qty_difference, int(s_edit["product_id"])))
 
-                    st.toast(f"Updated Sale #{s_edit['id']}!", icon="✏️")
-                    st.rerun()
+                        conn.commit()
+                        conn.close()
+
+                        st.toast(f"Updated Sale #{s_edit['id']}!", icon="✏️")
+                        st.rerun()
+
+                    if btn_delete:
+                        conn = get_db_connection()
+                        cursor = conn.cursor()
+                        # 1. Delete sale record from SQLite
+                        cursor.execute("DELETE FROM sales WHERE id = ?", (int(s_edit["id"]),))
+                        # 2. Restore stock back to inventory
+                        cursor.execute("UPDATE inventory SET stock = stock + ? WHERE id = ?", (int(s_edit["quantity"]), int(s_edit["product_id"])))
+                        conn.commit()
+                        conn.close()
+
+                        st.toast(f"Deleted Sale #{s_edit['id']} and restored {s_edit['quantity']} unit(s) back to inventory!", icon="🗑️")
+                        st.rerun()
+            else:
+                st.warning("No sales match the active filters above.")
         else:
             st.info("No sales recorded yet.")
