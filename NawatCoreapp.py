@@ -12,6 +12,38 @@ st.set_page_config(
     page_icon="🏢",
 )
 
+# --- MOBILE ADAPTABILITY & RESPONSIVE CSS INJECTION ---
+st.markdown("""
+<style>
+    /* Adjust page margins for narrow mobile screens */
+    @media (max-width: 768px) {
+        .main .block-container {
+            padding-left: 0.75rem !important;
+            padding-right: 0.75rem !important;
+            padding-top: 1rem !important;
+            padding-bottom: 2rem !important;
+        }
+        /* Touch-friendly full width buttons on mobile */
+        .stButton > button, div[data-baseweb="select"] {
+            width: 100% !important;
+        }
+        /* Mobile card styling for st.metric widgets */
+        div[data-testid="stMetric"] {
+            background-color: #F8F9FA;
+            border: 1px solid #E2E8F0;
+            padding: 10px 14px;
+            border-radius: 8px;
+            margin-bottom: 8px;
+        }
+        /* Responsive tab text size */
+        button[data-baseweb="tab"] {
+            font-size: 0.9em !important;
+            padding: 8px 10px !important;
+        }
+    }
+</style>
+""", unsafe_allow_html=True)
+
 # --- SQLITE LOCAL DATABASE SETUP ---
 DB_FILE = "nawatcore.db"
 
@@ -125,10 +157,10 @@ def render_product_card(row, subtitle="Product Overview"):
     sku = row.get('sku', 'N/A')
     
     card_html = f"""
-    <div style="border-left: 6px solid {border_col}; background-color: {bg_col}; color: {text_col}; padding: 14px 18px; border-radius: 8px; margin-top: 10px; margin-bottom: 18px;">
-        <div style="font-size: 0.85em; font-weight: bold; text-transform: uppercase; opacity: 0.75;">{subtitle}</div>
-        <div style="font-size: 1.15em; font-weight: bold;">{icon} {row['name']} <span style="font-size: 0.85em; font-weight: normal;">({cat} | SKU: {sku})</span></div>
-        <div style="font-size: 0.95em; display: flex; gap: 24px; flex-wrap: wrap; margin-top: 4px;">
+    <div style="border-left: 6px solid {border_col}; background-color: {bg_col}; color: {text_col}; padding: 12px 16px; border-radius: 8px; margin-top: 10px; margin-bottom: 16px; box-shadow: 0 1px 3px rgba(0,0,0,0.05);">
+        <div style="font-size: 0.8em; font-weight: bold; text-transform: uppercase; opacity: 0.75; letter-spacing: 0.5px;">{subtitle}</div>
+        <div style="font-size: 1.1em; font-weight: bold; margin-top: 2px;">{icon} {row['name']} <span style="font-size: 0.85em; font-weight: normal; opacity: 0.85;">({cat} | SKU: {sku})</span></div>
+        <div style="font-size: 0.9em; display: flex; gap: 16px; flex-wrap: wrap; margin-top: 6px;">
             <span>📦 <b>In Stock:</b> {stock} units</span>
             <span>🏷️ <b>Set Price:</b> ${price:.2f}</span>
             <span>💵 <b>Landed Cost:</b> ${landed:.2f}</span>
@@ -187,7 +219,7 @@ elif st.session_state.get("authentication_status"):
     st.sidebar.subheader("📤 Import Data from Excel")
     uploaded_excel = st.sidebar.file_uploader("Upload Excel File (.xlsx)", type=["xlsx"])
     if uploaded_excel is not None:
-        if st.sidebar.button("📥 Import & Replace Database", type="primary"):
+        if st.sidebar.button("📥 Import & Replace Database", type="primary", use_container_width=True):
             try:
                 import_excel_to_sqlite(uploaded_excel)
                 st.sidebar.success("Database successfully updated from Excel file!")
@@ -208,13 +240,13 @@ elif st.session_state.get("authentication_status"):
 
     authenticator.logout("Log Out", "sidebar")
 
-    st.title("📦 NawatCore | Inventory & Sales Management Hub")
+    st.title("📦 NawatCore | Inventory & Sales Hub")
 
     tabs = st.tabs([
         "📊 Dashboard",
-        "➕ Manage Inventory & Edit Items",
+        "➕ Manage Inventory",
         "🛒 Log Sales",
-        "📜 Sales History & Edit Transactions",
+        "📜 Sales Ledger",
     ])
 
     # -------------------------------------------------------------------
@@ -342,7 +374,7 @@ elif st.session_state.get("authentication_status"):
                     ep_default_price = ec1.number_input("Selling Price ($)", min_value=0.0, value=float(p_edit["default_price"]), step=0.50)
                     ep_stock = ec2.number_input("Stock Count", min_value=-9999, value=int(p_edit["stock"]), step=1)
 
-                    btn_save_prod = st.form_submit_button("💾 Save Product Details", type="primary")
+                    btn_save_prod = st.form_submit_button("💾 Save Product Details", type="primary", use_container_width=True)
                     if btn_save_prod:
                         conn = get_db_connection()
                         cursor = conn.cursor()
@@ -367,7 +399,7 @@ elif st.session_state.get("authentication_status"):
             p_default_price = col_a.number_input("Selling Price ($)", min_value=0.0, step=0.50)
             p_stock = col_b.number_input("Initial Stock", min_value=0, step=1)
 
-            submit = st.form_submit_button("Add New Product")
+            submit = st.form_submit_button("Add New Product", use_container_width=True)
             if submit and p_name.strip():
                 try:
                     conn = get_db_connection()
@@ -441,7 +473,7 @@ elif st.session_state.get("authentication_status"):
                 total_landed_cost = sale_qty * float(item["landed_cost"])
                 net_profit = net_total - total_landed_cost
 
-                if st.button("Complete Sale", type="primary"):
+                if st.button("Complete Sale", type="primary", use_container_width=True):
                     conn = get_db_connection()
                     cursor = conn.cursor()
                     cursor.execute("""
@@ -611,9 +643,7 @@ elif st.session_state.get("authentication_status"):
                     if btn_delete:
                         conn = get_db_connection()
                         cursor = conn.cursor()
-                        # 1. Delete sale record from SQLite
                         cursor.execute("DELETE FROM sales WHERE id = ?", (int(s_edit["id"]),))
-                        # 2. Restore stock back to inventory
                         cursor.execute("UPDATE inventory SET stock = stock + ? WHERE id = ?", (int(s_edit["quantity"]), int(s_edit["product_id"])))
                         conn.commit()
                         conn.close()
@@ -624,3 +654,4 @@ elif st.session_state.get("authentication_status"):
                 st.warning("No sales match the active filters above.")
         else:
             st.info("No sales recorded yet.")
+            
