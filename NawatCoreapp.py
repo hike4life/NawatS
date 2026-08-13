@@ -214,7 +214,7 @@ elif st.session_state.get("authentication_status"):
         "📊 Dashboard",
         "➕ Manage Inventory & Edit Items",
         "🛒 Log Sales",
-        "📜 Sales History & Filter Ledger",
+        "📜 Sales History & Edit Transactions",
     ])
 
     # -------------------------------------------------------------------
@@ -260,6 +260,42 @@ elif st.session_state.get("authentication_status"):
         m2.metric("Gross Revenue", f"${gross_rev:,.2f}")
         m3.metric("Net Profit", f"${net_profit:,.2f}")
         m4.metric("Total Units Sold", f"{total_units_sold_all:,} Units")
+
+        st.markdown("---")
+
+        # RECENT SALES SUMMARY (LAST 5 TRANSACTIONS)
+        st.subheader("⚡ Recent Activity (Last 5 Sales)")
+        if not sales_raw_df.empty and not products_df.empty:
+            recent_sales = sales_raw_df.sort_values(by="id", ascending=False).head(5).copy()
+            recent_merged = recent_sales.merge(
+                products_df[["id", "name"]], 
+                left_on="product_id", 
+                right_on="id", 
+                how="left", 
+                suffixes=("", "_prod")
+            ).rename(columns={"name": "Product Name"})
+
+            recent_merged["Product"] = recent_merged["Product Name"].apply(
+                lambda name: f"{get_product_theme(name)[0]} {name}" if pd.notna(name) else "📦 General Product"
+            )
+
+            recent_merged["Gross Total ($)"] = recent_merged["gross_total"].apply(lambda x: f"${x:,.2f}")
+            recent_merged["Net Profit ($)"] = recent_merged["net_profit"].apply(lambda x: f"${x:,.2f}")
+
+            disp_recent = recent_merged[[
+                "id", "sale_date", "Product", "quantity", 
+                "Gross Total ($)", "Net Profit ($)", "payment_method", "sale_type"
+            ]].rename(columns={
+                "id": "Sale ID", 
+                "sale_date": "Date", 
+                "quantity": "Qty", 
+                "payment_method": "Payment", 
+                "sale_type": "Channel"
+            })
+
+            st.dataframe(disp_recent, width="stretch", hide_index=True)
+        else:
+            st.info("No recent sales logged yet.")
 
         st.markdown("---")
         st.subheader("📊 Product Sales Performance & Stock")
@@ -421,22 +457,21 @@ elif st.session_state.get("authentication_status"):
                     st.rerun()
 
     # -------------------------------------------------------------------
-    # TAB 4: SALES HISTORY & CATEGORY FILTER LEDGER
+    # TAB 4: SALES HISTORY, FILTERS & EDIT TRANSACTIONS
     # -------------------------------------------------------------------
     with tabs[3]:
-        st.header("NawatCore Sales Ledger & Category Filters")
+        st.header("NawatCore Sales Ledger & Order Editing")
         sales_raw_df = load_sales_df()
         products_df = load_products_df()
 
         if not sales_raw_df.empty and not products_df.empty:
-            # Merge with explicit suffixes so sale 'id' remains 'id'
             sales_merged = sales_raw_df.merge(
-                products_df[["id", "name", "category"]], 
+                products_df[["id", "name", "category", "landed_cost"]], 
                 left_on="product_id", 
                 right_on="id", 
                 how="left", 
                 suffixes=("", "_prod")
-            ).rename(columns={"name": "Product Name", "category": "Category"})
+            ).rename(columns={"name": "Product Name", "category": "Category", "landed_cost": "prod_landed_cost"})
             
             sales_merged["Product Display"] = sales_merged["Product Name"].apply(
                 lambda name: f"{get_product_theme(name)[0]} {name}" if pd.notna(name) else "📦 General Product"
@@ -492,7 +527,6 @@ elif st.session_state.get("authentication_status"):
                 "net_profit", "payment_method", "sale_type", "notes"
             ]
             
-            # Safe selection of available columns
             valid_cols = [c for c in display_cols if c in filtered_ledger.columns]
 
             st.dataframe(
@@ -504,5 +538,70 @@ elif st.session_state.get("authentication_status"):
                 }),
                 width="stretch"
             )
+
+            st.markdown("---")
+
+            # EDIT TRANSACTION SECTION
+            st.subheader("✏️ Modify / Edit Existing Sale Record")
+            st.caption("Select a sale below to adjust pricing, quantities, notes, or payment methods.")
+
+            sale_list = {
+                f"Sale #{row['id']} - {row['Product Display']} (Qty: {row['quantity']} | ${row['gross_total']:.2f} on {row['sale_date']})": row
+                for _, row in sales_merged.iterrows()
+            }
+            selected_sale_label = st.selectbox("Select Sale Record to Modify", list(sale_list.keys()))
+            s_edit = sale_list[selected_sale_label]
+
+            with st.form("edit_sale_form"):
+                ec1, ec2 = st.columns(2)
+
+                with ec1:
+                    e_qty = ec1.number_input("Quantity Sold", min_value=1, value=int(s_edit["quantity"]), step=1)
+                    e_unit_price = ec1.number_input("Sale Price per Unit ($)", min_value=0.0, value=float(s_edit["unit_sale_price"]), step=0.50)
+                    e_type = ec1.radio("Sale Channel", ["Local", "Online"], index=0 if s_edit["sale_type"] == "Local" else 1, horizontal=True)
+                    
+                    e_shipping = 0.0
+                    if e_type == "Online":
+                        e_shipping = ec1.number_input("Shipping Paid ($)", min_value=0.0, value=float(s_edit["shipping_cost"]), step=0.50)
+
+                with ec2:
+                    pay_options = ["Cash", "Venmo", "Zelle", "Apple Pay", "Cash App", "Ebay", "MP", "Other"]
+                    default_pay_idx = pay_options.index(s_edit["payment_method"]) if s_edit["payment_method"] in pay_options else 0
+                    e_payment = ec2.selectbox("Payment Method", pay_options, index=default_pay_idx)
+                    
+                    parsed_dt = pd.to_datetime(s_edit["sale_date"], errors='coerce')
+                    if pd.isna(parsed_dt):
+                        parsed_dt = datetime.now()
+
+                    e_date = ec2.date_input("Transaction Date", parsed_dt.date())
+                    e_timestamp = e_date.strftime("%Y-%m-%d %H:%M:%S")
+
+                e_notes = st.text_input("Comments / Notes", value=str(s_edit["notes"]) if pd.notna(s_edit["notes"]) else "")
+
+                e_gross = e_qty * e_unit_price
+                e_net = e_gross - e_shipping
+                item_landed = float(s_edit["prod_landed_cost"]) if pd.notna(s_edit["prod_landed_cost"]) else 0.0
+                e_landed_total = e_qty * item_landed
+                e_profit = e_net - e_landed_total
+                qty_difference = e_qty - int(s_edit["quantity"])
+
+                btn_edit = st.form_submit_button("💾 Save Updated Sale Record", type="primary")
+                if btn_edit:
+                    conn = get_db_connection()
+                    cursor = conn.cursor()
+                    cursor.execute("""
+                        UPDATE sales 
+                        SET quantity=?, unit_sale_price=?, gross_total=?, sale_type=?, shipping_cost=?, net_total=?, landed_cost_total=?, net_profit=?, payment_method=?, sale_date=?, notes=?
+                        WHERE id=?
+                    """, (e_qty, e_unit_price, e_gross, e_type, e_shipping, e_net, e_landed_total, e_profit, e_payment, e_timestamp, e_notes.strip(), int(s_edit["id"])))
+
+                    if qty_difference != 0:
+                        cursor.execute("UPDATE inventory SET stock = stock - ? WHERE id = ?", (qty_difference, int(s_edit["product_id"])))
+
+                    conn.commit()
+                    conn.close()
+
+                    st.toast(f"Updated Sale #{s_edit['id']}!", icon="✏️")
+                    st.rerun()
         else:
             st.info("No sales recorded yet.")
