@@ -12,7 +12,7 @@ st.set_page_config(
     page_icon="🏢",
 )
 
-# --- MOBILE ADAPTABILITY & RESPONSIVE CSS INJECTION ---
+# --- MOBILE ADAPTABILITY & RESPONSIVE CSS INJECTION (DARK MODE COMPATIBLE) ---
 st.markdown("""
 <style>
     /* Adjust page margins for narrow mobile screens */
@@ -27,18 +27,18 @@ st.markdown("""
         .stButton > button, div[data-baseweb="select"] {
             width: 100% !important;
         }
-        /* Mobile card styling for st.metric widgets */
+        /* Theme-adaptive mobile card styling for st.metric widgets */
         div[data-testid="stMetric"] {
-            background-color: #F8F9FA;
-            border: 1px solid #E2E8F0;
-            padding: 10px 14px;
-            border-radius: 8px;
-            margin-bottom: 8px;
+            background-color: rgba(128, 128, 128, 0.08) !important;
+            border: 1px solid rgba(128, 128, 128, 0.2) !important;
+            padding: 12px 14px !important;
+            border-radius: 8px !important;
+            margin-bottom: 8px !important;
         }
         /* Responsive tab text size */
         button[data-baseweb="tab"] {
-            font-size: 0.9em !important;
-            padding: 8px 10px !important;
+            font-size: 0.85em !important;
+            padding: 6px 8px !important;
         }
     }
 </style>
@@ -654,4 +654,3 @@ elif st.session_state.get("authentication_status"):
                 st.warning("No sales match the active filters above.")
         else:
             st.info("No sales recorded yet.")
-            
