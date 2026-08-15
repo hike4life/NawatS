@@ -1,9 +1,9 @@
 from datetime import datetime
 import io
-import sqlite3
 import pandas as pd
 import streamlit as st
 import streamlit_authenticator as stauth
+from supabase import create_client, Client
 
 # --- STREAMLIT PAGE CONFIG ---
 st.set_page_config(
@@ -12,7 +12,7 @@ st.set_page_config(
     page_icon="🏢",
 )
 
-# --- MOBILE ADAPTABILITY & RESPONSIVE CSS INJECTION ---
+# --- MOBILE ADAPTABILITY & DARK MODE CSS INJECTION ---
 st.markdown("""
 <style>
     @media (max-width: 768px) {
@@ -40,65 +40,30 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# --- SQLITE LOCAL DATABASE SETUP ---
-DB_FILE = "nawatcore.db"
+# --- SUPABASE DATABASE CONNECTION ---
+@st.cache_resource
+def init_supabase() -> Client:
+    url = st.secrets["supabase"]["SUPABASE_URL"]
+    key = st.secrets["supabase"]["SUPABASE_KEY"]
+    return create_client(url, key)
 
-def init_sqlite_db():
-    """Initializes local SQLite database tables if they do not exist."""
-    conn = sqlite3.connect(DB_FILE)
-    cursor = conn.cursor()
-    
-    cursor.execute("""
-    CREATE TABLE IF NOT EXISTS inventory (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        name TEXT UNIQUE NOT NULL,
-        sku TEXT,
-        category TEXT,
-        landed_cost REAL DEFAULT 0.0,
-        default_price REAL DEFAULT 0.0,
-        stock INTEGER DEFAULT 0
-    )
-    """)
-    
-    cursor.execute("""
-    CREATE TABLE IF NOT EXISTS sales (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        product_id INTEGER,
-        quantity INTEGER,
-        unit_sale_price REAL,
-        gross_total REAL,
-        sale_type TEXT,
-        shipping_cost REAL,
-        net_total REAL,
-        landed_cost_total REAL,
-        net_profit REAL,
-        payment_method TEXT,
-        sale_date TEXT,
-        notes TEXT,
-        FOREIGN KEY (product_id) REFERENCES inventory (id)
-    )
-    """)
-    conn.commit()
-    conn.close()
-
-init_sqlite_db()
+try:
+    supabase = init_supabase()
+except Exception as e:
+    st.error(f"⚠️ Supabase connection error: {e}")
+    st.stop()
 
 # --- DATABASE HELPERS ---
-def get_db_connection():
-    return sqlite3.connect(DB_FILE)
-
 def load_products_df():
-    conn = get_db_connection()
-    df = pd.read_sql_query("SELECT * FROM inventory", conn)
-    conn.close()
+    res = supabase.table("inventory").select("*").execute()
+    df = pd.DataFrame(res.data)
     if df.empty:
         return pd.DataFrame(columns=["id", "name", "sku", "category", "landed_cost", "default_price", "stock"])
     return df
 
 def load_sales_df():
-    conn = get_db_connection()
-    df = pd.read_sql_query("SELECT * FROM sales", conn)
-    conn.close()
+    res = supabase.table("sales").select("*").execute()
+    df = pd.DataFrame(res.data)
     if df.empty:
         return pd.DataFrame(columns=[
             "id", "product_id", "quantity", "unit_sale_price", "gross_total", 
@@ -107,29 +72,26 @@ def load_sales_df():
         ])
     return df
 
-def import_excel_to_sqlite(file):
-    """Imports Excel sheets (Inventory & Sales) directly into SQLite database."""
+def import_excel_to_supabase(file):
+    """Imports Excel sheets (Inventory & Sales) directly into Supabase Cloud Database."""
     xls = pd.ExcelFile(file)
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    
     for sheet in xls.sheet_names:
         if sheet.lower() == "inventory":
-            df_inv = pd.read_excel(file, sheet_name=sheet)
-            cursor.execute("DELETE FROM inventory")
-            conn.commit()
-            df_inv.to_sql("inventory", conn, if_exists="append", index=False)
+            df_inv = pd.read_excel(file, sheet_name=sheet).fillna("")
+            records = df_inv.to_dict(orient="records")
+            supabase.table("inventory").delete().neq("id", -1).execute()
+            if records:
+                supabase.table("inventory").insert(records).execute()
             
         elif sheet.lower() == "sales":
-            df_sales = pd.read_excel(file, sheet_name=sheet)
-            cursor.execute("DELETE FROM sales")
-            conn.commit()
-            df_sales.to_sql("sales", conn, if_exists="append", index=False)
-            
-    conn.close()
+            df_sales = pd.read_excel(file, sheet_name=sheet).fillna("")
+            records = df_sales.to_dict(orient="records")
+            supabase.table("sales").delete().neq("id", -1).execute()
+            if records:
+                supabase.table("sales").insert(records).execute()
 
 def execute_quick_sale(product_row, qty=1, payment_method="Cash", channel="Local", notes="Quick Express Log"):
-    """Helper to log a fast sale transaction and adjust inventory stock instantly."""
+    """Logs a fast sale transaction to Supabase and updates stock."""
     p_id = int(product_row["id"])
     unit_price = float(product_row["default_price"])
     landed_unit = float(product_row["landed_cost"])
@@ -141,16 +103,25 @@ def execute_quick_sale(product_row, qty=1, payment_method="Cash", channel="Local
     profit = net - landed_tot
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    cursor.execute("""
-        INSERT INTO sales (product_id, quantity, unit_sale_price, gross_total, sale_type, shipping_cost, net_total, landed_cost_total, net_profit, payment_method, sale_date, notes)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    """, (p_id, qty, unit_price, gross, channel, shipping, net, landed_tot, profit, payment_method, now_str, notes))
-    
-    cursor.execute("UPDATE inventory SET stock = stock - ? WHERE id = ?", (qty, p_id))
-    conn.commit()
-    conn.close()
+    # Insert into Supabase
+    supabase.table("sales").insert({
+        "product_id": p_id,
+        "quantity": qty,
+        "unit_sale_price": unit_price,
+        "gross_total": gross,
+        "sale_type": channel,
+        "shipping_cost": shipping,
+        "net_total": net,
+        "landed_cost_total": landed_tot,
+        "net_profit": profit,
+        "payment_method": payment_method,
+        "sale_date": now_str,
+        "notes": notes
+    }).execute()
+
+    # Decrement stock in Supabase
+    new_stock = max(0, int(product_row["stock"]) - qty)
+    supabase.table("inventory").update({"stock": new_stock}).eq("id", p_id).execute()
 
 # --- VISUAL COLOR THEME ENGINE ---
 def get_product_theme(product_name):
@@ -241,8 +212,8 @@ elif st.session_state.get("authentication_status"):
     if uploaded_excel is not None:
         if st.sidebar.button("📥 Import & Replace Database", type="primary", use_container_width=True):
             try:
-                import_excel_to_sqlite(uploaded_excel)
-                st.sidebar.success("Database successfully updated from Excel file!")
+                import_excel_to_supabase(uploaded_excel)
+                st.sidebar.success("Supabase database successfully updated!")
                 st.rerun()
             except Exception as e:
                 st.sidebar.error(f"Error importing file: {e}")
@@ -362,16 +333,14 @@ elif st.session_state.get("authentication_status"):
     # -------------------------------------------------------------------
     with tabs[1]:
         st.header("⚡ Express Checkout (1-Tap Fast Log)")
-        st.caption("Tap any product button below to instantly record a 1-unit sale at default price!")
+        st.caption("Tap any product button below to instantly record a sale in your database.")
         products_df = load_products_df()
 
         if not products_df.empty:
-            # Payment Method Quick Toggle
             quick_pay = st.radio("Payment Method for Express Log", ["Cash", "Venmo", "Zelle", "Apple Pay", "Ebay", "MP"], horizontal=True)
             st.markdown("---")
 
             st.subheader("🔥 Quick Tap Best Sellers")
-            # Filter in-stock items
             in_stock_df = products_df[products_df["stock"] > 0]
 
             if not in_stock_df.empty:
@@ -404,7 +373,6 @@ elif st.session_state.get("authentication_status"):
 
                 btn_ex_submit = st.form_submit_button("⚡ Instant Log Sale", type="primary", use_container_width=True)
                 if btn_ex_submit:
-                    # Update row price if custom price entered
                     ex_item_copy = ex_item.copy()
                     ex_item_copy["default_price"] = ex_price
                     execute_quick_sale(ex_item_copy, qty=ex_qty, payment_method=quick_pay, notes="Express Form Log")
@@ -412,7 +380,7 @@ elif st.session_state.get("authentication_status"):
                     st.rerun()
 
     # -------------------------------------------------------------------
-    # TAB 3: DETAILED SALE (FULL CONTROL)
+    # TAB 3: DETAILED SALE
     # -------------------------------------------------------------------
     with tabs[2]:
         st.header("Record Detailed Transaction")
@@ -456,22 +424,29 @@ elif st.session_state.get("authentication_status"):
                 net_profit = net_total - total_landed_cost
 
                 if st.button("Complete Detailed Sale", type="primary", use_container_width=True):
-                    conn = get_db_connection()
-                    cursor = conn.cursor()
-                    cursor.execute("""
-                        INSERT INTO sales (product_id, quantity, unit_sale_price, gross_total, sale_type, shipping_cost, net_total, landed_cost_total, net_profit, payment_method, sale_date, notes)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """, (int(item["id"]), sale_qty, actual_unit_price, gross_total, sale_type, shipping_cost, net_total, total_landed_cost, net_profit, payment_method, sale_timestamp, sale_notes.strip()))
-                    
-                    cursor.execute("UPDATE inventory SET stock = stock - ? WHERE id = ?", (sale_qty, int(item["id"])))
-                    conn.commit()
-                    conn.close()
+                    supabase.table("sales").insert({
+                        "product_id": int(item["id"]),
+                        "quantity": sale_qty,
+                        "unit_sale_price": actual_unit_price,
+                        "gross_total": gross_total,
+                        "sale_type": sale_type,
+                        "shipping_cost": shipping_cost,
+                        "net_total": net_total,
+                        "landed_cost_total": total_landed_cost,
+                        "net_profit": net_profit,
+                        "payment_method": payment_method,
+                        "sale_date": sale_timestamp,
+                        "notes": sale_notes.strip()
+                    }).execute()
+
+                    new_stock = max(0, int(item["stock"]) - sale_qty)
+                    supabase.table("inventory").update({"stock": new_stock}).eq("id", int(item["id"])).execute()
 
                     st.toast("Sale logged permanently!", icon="🛒")
                     st.rerun()
 
     # -------------------------------------------------------------------
-    # TAB 4: MANAGE INVENTORY, CATEGORY FILTER & EDIT ITEMS
+    # TAB 4: MANAGE INVENTORY
     # -------------------------------------------------------------------
     with tabs[3]:
         st.header("Inventory Management")
@@ -510,17 +485,17 @@ elif st.session_state.get("authentication_status"):
 
                     btn_save_prod = st.form_submit_button("💾 Save Product Details", type="primary", use_container_width=True)
                     if btn_save_prod:
-                        conn = get_db_connection()
-                        cursor = conn.cursor()
-                        cursor.execute("""
-                            UPDATE inventory SET name=?, sku=?, category=?, landed_cost=?, default_price=?, stock=? WHERE id=?
-                        """, (ep_name.strip(), ep_sku.strip(), ep_category.strip(), ep_landed_cost, ep_default_price, ep_stock, int(p_edit["id"])))
-                        conn.commit()
-                        conn.close()
+                        supabase.table("inventory").update({
+                            "name": ep_name.strip(),
+                            "sku": ep_sku.strip(),
+                            "category": ep_category.strip(),
+                            "landed_cost": ep_landed_cost,
+                            "default_price": ep_default_price,
+                            "stock": ep_stock
+                        }).eq("id", int(p_edit["id"])).execute()
+
                         st.toast(f"Saved {ep_name}!", icon="✏️")
                         st.rerun()
-            else:
-                st.warning("No products found in this category.")
 
         st.markdown("---")
         st.subheader("➕ Add Brand New Product")
@@ -536,13 +511,14 @@ elif st.session_state.get("authentication_status"):
             submit = st.form_submit_button("Add New Product", use_container_width=True)
             if submit and p_name.strip():
                 try:
-                    conn = get_db_connection()
-                    cursor = conn.cursor()
-                    cursor.execute("""
-                        INSERT INTO inventory (name, sku, category, landed_cost, default_price, stock) VALUES (?, ?, ?, ?, ?, ?)
-                    """, (p_name.strip(), p_sku.strip(), p_cat.strip(), p_landed_cost, p_default_price, p_stock))
-                    conn.commit()
-                    conn.close()
+                    supabase.table("inventory").insert({
+                        "name": p_name.strip(),
+                        "sku": p_sku.strip(),
+                        "category": p_cat.strip(),
+                        "landed_cost": p_landed_cost,
+                        "default_price": p_default_price,
+                        "stock": p_stock
+                    }).execute()
                     st.toast(f"Added {p_name} to database!", icon="🎉")
                     st.rerun()
                 except Exception as e:
@@ -564,7 +540,7 @@ elif st.session_state.get("authentication_status"):
             )
 
     # -------------------------------------------------------------------
-    # TAB 5: SALES HISTORY, FILTERS & EDIT TRANSACTIONS
+    # TAB 5: SALES LEDGER
     # -------------------------------------------------------------------
     with tabs[4]:
         st.header("NawatCore Sales Ledger & Order Editing")
@@ -587,11 +563,9 @@ elif st.session_state.get("authentication_status"):
             st.subheader("🔍 Filter Sales Ledger")
             fc1, fc2, fc3, fc4 = st.columns(4)
 
-            # Category Filter Dropdown
             all_cats = ["All Categories"] + sorted(list(sales_merged["Category"].dropna().unique()))
             selected_cat = fc1.selectbox("Filter by Category", all_cats)
 
-            # Product Filter Dropdown
             if selected_cat != "All Categories":
                 cat_filtered_sales = sales_merged[sales_merged["Category"] == selected_cat]
             else:
@@ -600,14 +574,11 @@ elif st.session_state.get("authentication_status"):
             all_prods = ["All Products"] + sorted(list(cat_filtered_sales["Product Display"].dropna().unique()))
             selected_prod = fc2.selectbox("Filter by Product", all_prods)
 
-            # Payment Method Filter
             all_pay = ["All Payment Methods"] + sorted(list(sales_merged["payment_method"].dropna().unique()))
             selected_pay = fc3.selectbox("Filter by Payment Method", all_pay)
 
-            # Sale Channel Filter
             selected_channel = fc4.selectbox("Filter by Channel", ["All Channels", "Local", "Online"])
 
-            # Apply All Active Filters
             filtered_ledger = sales_merged.copy()
 
             if selected_cat != "All Categories":
@@ -619,7 +590,6 @@ elif st.session_state.get("authentication_status"):
             if selected_channel != "All Channels":
                 filtered_ledger = filtered_ledger[filtered_ledger["sale_type"] == selected_channel]
 
-            # Metric Bar for Filtered Results
             f_rev = filtered_ledger["gross_total"].sum() if not filtered_ledger.empty else 0.0
             f_profit = filtered_ledger["net_profit"].sum() if not filtered_ledger.empty else 0.0
             f_units = filtered_ledger["quantity"].sum() if not filtered_ledger.empty else 0
@@ -648,7 +618,6 @@ elif st.session_state.get("authentication_status"):
 
             st.markdown("---")
 
-            # EDIT OR DELETE TRANSACTION SECTION
             st.subheader("✏️ Modify or Delete Existing Sale Record")
             st.caption("The list below automatically filters to show only the matching sales from the table above.")
 
@@ -698,32 +667,37 @@ elif st.session_state.get("authentication_status"):
                     btn_delete = btn_col2.form_submit_button("🗑️ Fully Delete Sale Record", type="secondary", use_container_width=True)
 
                     if btn_edit:
-                        conn = get_db_connection()
-                        cursor = conn.cursor()
-                        cursor.execute("""
-                            UPDATE sales 
-                            SET quantity=?, unit_sale_price=?, gross_total=?, sale_type=?, shipping_cost=?, net_total=?, landed_cost_total=?, net_profit=?, payment_method=?, sale_date=?, notes=?
-                            WHERE id=?
-                        """, (e_qty, e_unit_price, e_gross, e_type, e_shipping, e_net, e_landed_total, e_profit, e_payment, e_timestamp, e_notes.strip(), int(s_edit["id"])))
+                        supabase.table("sales").update({
+                            "quantity": e_qty,
+                            "unit_sale_price": e_unit_price,
+                            "gross_total": e_gross,
+                            "sale_type": e_type,
+                            "shipping_cost": e_shipping,
+                            "net_total": e_net,
+                            "landed_cost_total": e_landed_total,
+                            "net_profit": e_profit,
+                            "payment_method": e_payment,
+                            "sale_date": e_timestamp,
+                            "notes": e_notes.strip()
+                        }).eq("id", int(s_edit["id"])).execute()
 
                         if qty_difference != 0:
-                            cursor.execute("UPDATE inventory SET stock = stock - ? WHERE id = ?", (qty_difference, int(s_edit["product_id"])))
-
-                        conn.commit()
-                        conn.close()
+                            p_curr = supabase.table("inventory").select("stock").eq("id", int(s_edit["product_id"])).execute()
+                            if p_curr.data:
+                                curr_stk = p_curr.data[0]["stock"]
+                                supabase.table("inventory").update({"stock": max(0, curr_stk - qty_difference)}).eq("id", int(s_edit["product_id"])).execute()
 
                         st.toast(f"Updated Sale #{s_edit['id']}!", icon="✏️")
                         st.rerun()
 
                     if btn_delete:
-                        conn = get_db_connection()
-                        cursor = conn.cursor()
-                        cursor.execute("DELETE FROM sales WHERE id = ?", (int(s_edit["id"]),))
-                        cursor.execute("UPDATE inventory SET stock = stock + ? WHERE id = ?", (int(s_edit["quantity"]), int(s_edit["product_id"])))
-                        conn.commit()
-                        conn.close()
+                        supabase.table("sales").delete().eq("id", int(s_edit["id"])).execute()
+                        p_curr = supabase.table("inventory").select("stock").eq("id", int(s_edit["product_id"])).execute()
+                        if p_curr.data:
+                            curr_stk = p_curr.data[0]["stock"]
+                            supabase.table("inventory").update({"stock": curr_stk + int(s_edit["quantity"])}).eq("id", int(s_edit["product_id"])).execute()
 
-                        st.toast(f"Deleted Sale #{s_edit['id']} and restored {s_edit['quantity']} unit(s) back to inventory!", icon="🗑️")
+                        st.toast(f"Deleted Sale #{s_edit['id']} and restored stock!", icon="🗑️")
                         st.rerun()
             else:
                 st.warning("No sales match the active filters above.")
