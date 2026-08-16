@@ -1,15 +1,20 @@
 from datetime import datetime
 import io
+import os
 import pandas as pd
 import streamlit as st
 import streamlit_authenticator as stauth
 from supabase import create_client, Client
 
+# --- LOGO FILE PATH CHECK ---
+LOGO_FILE = "logo.jpg"
+has_logo = os.path.exists(LOGO_FILE)
+
 # --- STREAMLIT PAGE CONFIG ---
 st.set_page_config(
     page_title="NawatCore - Inventory & Sales Hub",
     layout="wide",
-    page_icon="🏢",
+    page_icon=LOGO_FILE if has_logo else "🏢",
 )
 
 # --- MOBILE ADAPTABILITY & DARK MODE CSS INJECTION ---
@@ -197,7 +202,13 @@ authenticator = stauth.Authenticate(
     cookie_expiry_days=30,
 )
 
-st.title("🏢 NawatCore")
+# --- MAIN APP HEADER LOGO ---
+if has_logo:
+    st.image(LOGO_FILE, width=160)
+else:
+    st.sidebar.warning(f"⚠️ Image '{LOGO_FILE}' not detected. Files in root: {os.listdir('.')}")
+
+st.title("NawatCore")
 st.caption("Official Inventory & Sales Management Portal")
 st.markdown("---")
 
@@ -209,7 +220,10 @@ elif st.session_state.get("authentication_status") is None:
     st.warning("Please enter your credentials to log in to NawatCore.")
 elif st.session_state.get("authentication_status"):
 
-    st.sidebar.title("🏢 NawatCore")
+    # --- SIDEBAR LOGO DISPLAY ---
+    if has_logo:
+        st.sidebar.image(LOGO_FILE, use_container_width=True)
+    st.sidebar.title("NawatCore")
     st.sidebar.caption("Management Console")
     st.sidebar.write(f"Logged in as: **{st.session_state['name']}**")
     
@@ -238,7 +252,7 @@ elif st.session_state.get("authentication_status"):
 
     authenticator.logout("Log Out", "sidebar")
 
-    st.title("📦 NawatCore | Inventory & Sales Hub")
+    st.title("📦 Inventory & Sales Hub")
 
     tabs = st.tabs([
         "📊 Dashboard",
@@ -336,12 +350,11 @@ elif st.session_state.get("authentication_status"):
             st.info("No products in database.")
 
     # -------------------------------------------------------------------
-    # TAB 2: ⚡ EXPRESS SALE (1-TAP CHECKOUT WITH CONFIRMATION BANNER)
+    # TAB 2: ⚡ EXPRESS SALE
     # -------------------------------------------------------------------
     with tabs[1]:
         st.header("⚡ Express Checkout (1-Tap Fast Log)")
         
-        # Display Success Banner if Sale Was Submitted
         if "sale_success_banner" in st.session_state:
             st.success(st.session_state["sale_success_banner"], icon="🎉")
             del st.session_state["sale_success_banner"]
@@ -391,12 +404,11 @@ elif st.session_state.get("authentication_status"):
                     st.rerun()
 
     # -------------------------------------------------------------------
-    # TAB 3: DETAILED SALE (WITH CONFIRMATION BANNER)
+    # TAB 3: DETAILED SALE
     # -------------------------------------------------------------------
     with tabs[2]:
         st.header("Record Detailed Transaction")
 
-        # Display Success Banner if Sale Was Submitted
         if "sale_success_banner" in st.session_state:
             st.success(st.session_state["sale_success_banner"], icon="🎉")
             del st.session_state["sale_success_banner"]
