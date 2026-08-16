@@ -73,25 +73,31 @@ def load_sales_df():
     return df
 
 def import_excel_to_supabase(file):
-    """Imports Excel sheets (Inventory & Sales) directly into Supabase Cloud Database."""
+    """Imports Excel sheets (Inventory & Sales) cleanly into Supabase Cloud Database."""
     xls = pd.ExcelFile(file)
+    
+    inv_records = []
+    sales_records = []
+
     for sheet in xls.sheet_names:
         if sheet.lower() == "inventory":
             df_inv = pd.read_excel(file, sheet_name=sheet).fillna("")
-            records = df_inv.to_dict(orient="records")
-            supabase.table("inventory").delete().neq("id", -1).execute()
-            if records:
-                supabase.table("inventory").insert(records).execute()
-            
+            inv_records = df_inv.to_dict(orient="records")
         elif sheet.lower() == "sales":
             df_sales = pd.read_excel(file, sheet_name=sheet).fillna("")
-            records = df_sales.to_dict(orient="records")
-            supabase.table("sales").delete().neq("id", -1).execute()
-            if records:
-                supabase.table("sales").insert(records).execute()
+            sales_records = df_sales.to_dict(orient="records")
+
+    supabase.table("sales").delete().neq("id", -1).execute()
+    supabase.table("inventory").delete().neq("id", -1).execute()
+    
+    if inv_records:
+        supabase.table("inventory").insert(inv_records).execute()
+
+    if sales_records:
+        supabase.table("sales").insert(sales_records).execute()
 
 def execute_quick_sale(product_row, qty=1, payment_method="Cash", channel="Local", notes="Quick Express Log"):
-    """Logs a fast sale transaction to Supabase and updates stock."""
+    """Logs a fast sale transaction to Supabase, updates stock, and stores confirmation message."""
     p_id = int(product_row["id"])
     unit_price = float(product_row["default_price"])
     landed_unit = float(product_row["landed_cost"])
@@ -103,7 +109,6 @@ def execute_quick_sale(product_row, qty=1, payment_method="Cash", channel="Local
     profit = net - landed_tot
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-    # Insert into Supabase
     supabase.table("sales").insert({
         "product_id": p_id,
         "quantity": qty,
@@ -119,9 +124,11 @@ def execute_quick_sale(product_row, qty=1, payment_method="Cash", channel="Local
         "notes": notes
     }).execute()
 
-    # Decrement stock in Supabase
     new_stock = max(0, int(product_row["stock"]) - qty)
     supabase.table("inventory").update({"stock": new_stock}).eq("id", p_id).execute()
+
+    # Store persistent confirmation banner message
+    st.session_state["sale_success_banner"] = f"✅ Sale Successfully Submitted! Recorded {qty}x {product_row['name']} for ${gross:,.2f} ({payment_method})."
 
 # --- VISUAL COLOR THEME ENGINE ---
 def get_product_theme(product_name):
@@ -329,10 +336,16 @@ elif st.session_state.get("authentication_status"):
             st.info("No products in database.")
 
     # -------------------------------------------------------------------
-    # TAB 2: ⚡ EXPRESS SALE (1-TAP CHECKOUT)
+    # TAB 2: ⚡ EXPRESS SALE (1-TAP CHECKOUT WITH CONFIRMATION BANNER)
     # -------------------------------------------------------------------
     with tabs[1]:
         st.header("⚡ Express Checkout (1-Tap Fast Log)")
+        
+        # Display Success Banner if Sale Was Submitted
+        if "sale_success_banner" in st.session_state:
+            st.success(st.session_state["sale_success_banner"], icon="🎉")
+            del st.session_state["sale_success_banner"]
+
         st.caption("Tap any product button below to instantly record a sale in your database.")
         products_df = load_products_df()
 
@@ -352,7 +365,6 @@ elif st.session_state.get("authentication_status"):
                     
                     if col_target.button(btn_label, key=f"quick_btn_{row['id']}", use_container_width=True):
                         execute_quick_sale(row, qty=1, payment_method=quick_pay)
-                        st.toast(f"Logged 1x {row['name']} via {quick_pay}!", icon="⚡")
                         st.rerun()
             else:
                 st.warning("All inventory items currently show 0 stock.")
@@ -376,14 +388,19 @@ elif st.session_state.get("authentication_status"):
                     ex_item_copy = ex_item.copy()
                     ex_item_copy["default_price"] = ex_price
                     execute_quick_sale(ex_item_copy, qty=ex_qty, payment_method=quick_pay, notes="Express Form Log")
-                    st.toast(f"Logged {ex_qty}x {ex_item['name']}!", icon="🚀")
                     st.rerun()
 
     # -------------------------------------------------------------------
-    # TAB 3: DETAILED SALE
+    # TAB 3: DETAILED SALE (WITH CONFIRMATION BANNER)
     # -------------------------------------------------------------------
     with tabs[2]:
         st.header("Record Detailed Transaction")
+
+        # Display Success Banner if Sale Was Submitted
+        if "sale_success_banner" in st.session_state:
+            st.success(st.session_state["sale_success_banner"], icon="🎉")
+            del st.session_state["sale_success_banner"]
+
         products_df = load_products_df()
 
         if not products_df.empty:
@@ -442,7 +459,7 @@ elif st.session_state.get("authentication_status"):
                     new_stock = max(0, int(item["stock"]) - sale_qty)
                     supabase.table("inventory").update({"stock": new_stock}).eq("id", int(item["id"])).execute()
 
-                    st.toast("Sale logged permanently!", icon="🛒")
+                    st.session_state["sale_success_banner"] = f"✅ Detailed Sale Logged! Recorded {sale_qty}x {item['name']} for ${gross_total:,.2f} ({payment_method})."
                     st.rerun()
 
     # -------------------------------------------------------------------
